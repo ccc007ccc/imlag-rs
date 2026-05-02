@@ -11,12 +11,28 @@ use std::time::Duration;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE, HWND};
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetKeyboardState, MapVirtualKeyW, VkKeyScanW, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     MAPVK_VK_TO_VSC, VIRTUAL_KEY,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+/// CS2's chat box has a small grace period between gaining focus and
+/// being ready to accept characters; sub-15ms gaps before paste / Enter
+/// can drop the keystroke entirely. This is the floor every press_*
+/// helper enforces, regardless of the user's configured `key_delay`.
+const MIN_KEY_INTERVAL: Duration = Duration::from_millis(15);
+
+fn at_least(d: Duration) -> Duration {
+    if d < MIN_KEY_INTERVAL {
+        MIN_KEY_INTERVAL
+    } else {
+        d
+    }
+}
 
 const VK_CONTROL: u8 = 0x11;
 const VK_RETURN: u8 = 0x0D;
@@ -108,8 +124,10 @@ fn key_event(vk: u8, up: bool) {
 }
 
 /// Send a single press-and-release. The `delay` argument controls both the
-/// hold time and the rest before returning.
+/// hold time and the rest before returning. Both are clamped up to
+/// [`MIN_KEY_INTERVAL`] so CS2 always sees the keystroke.
 pub fn press_key(ch: char, delay: Duration) {
+    let delay = at_least(delay);
     let vk = char_to_vk(ch);
     key_event(vk, false);
     sleep(delay);
@@ -124,6 +142,7 @@ pub fn press_key_spec(spec: &str, delay: Duration) -> bool {
     let Some(vk) = spec_to_vk(spec) else {
         return false;
     };
+    let delay = at_least(delay);
     key_event(vk, false);
     sleep(delay);
     key_event(vk, true);
@@ -198,9 +217,10 @@ pub fn release_all_keys() {
 
 /// Type the standard "select all + delete" sequence into the focused control.
 pub fn clear_input(delay: Duration) {
+    let delay = at_least(delay);
     key_down('\u{11}');
-    sleep(Duration::from_millis(50));
-    press_key('A', Duration::from_millis(50));
+    sleep(delay);
+    press_key('A', delay);
     key_up('\u{11}');
     sleep(delay);
     press_key('\u{2E}', delay); // Delete
@@ -209,14 +229,45 @@ pub fn clear_input(delay: Duration) {
 /// Type the standard Ctrl+V paste shortcut.
 pub fn paste_clipboard() {
     key_down('\u{11}');
-    std::thread::sleep(Duration::from_millis(50));
-    press_key('V', Duration::from_millis(50));
+    sleep(MIN_KEY_INTERVAL);
+    press_key('V', MIN_KEY_INTERVAL);
     key_up('\u{11}');
+    // Without this trailing rest CS2 occasionally treats the next
+    // synthesised key (Enter) as a Ctrl-modified one before the OS has
+    // delivered the modifier-up event.
+    sleep(MIN_KEY_INTERVAL);
 }
 
 /// Press the Enter key once.
 pub fn press_enter() {
-    press_key('\u{0D}', Duration::from_millis(50));
+    press_key('\u{0D}', MIN_KEY_INTERVAL);
+}
+
+/// Read the clipboard's current text contents, if any.
+///
+/// Returns `None` if the clipboard contains non-text data (image, file
+/// list, …) — the caller should treat that as "nothing to restore" and
+/// leave the new payload in place after sending. Saves/restores are
+/// best-effort: a failure here is never fatal.
+pub fn clipboard_text() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    cb.get_text().ok()
+}
+
+/// Milliseconds since the user's last keyboard or mouse input.
+///
+/// Wraps `GetLastInputInfo`. Returns `0` on the first failed call so
+/// callers fall back to "no idle window" rather than blocking forever.
+pub fn idle_millis() -> u32 {
+    let mut lii = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !unsafe { GetLastInputInfo(&mut lii) }.as_bool() {
+        return 0;
+    }
+    let now = unsafe { GetTickCount() };
+    now.saturating_sub(lii.dwTime)
 }
 
 /// Returns `true` when the foreground window belongs to the `cs2.exe`

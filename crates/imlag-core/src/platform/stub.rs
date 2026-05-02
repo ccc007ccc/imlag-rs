@@ -46,3 +46,14 @@ pub fn press_enter() {}
 pub fn is_cs2_active() -> bool {
     false
 }
+
+/// Stub: no clipboard access reported (caller will skip restore).
+pub fn clipboard_text() -> Option<String> {
+    None
+}
+
+/// Stub: pretend the user has just been idle forever, so callers don't
+/// gate dispatches on idle detection on non-Windows builds.
+pub fn idle_millis() -> u32 {
+    u32::MAX
+}
