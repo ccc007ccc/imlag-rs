@@ -6,6 +6,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Channel selection strategy for CFG mode.
+///
+/// CFG mode rewrites a single dispatch cfg at runtime; this enum decides
+/// whether the produced line is `say "..."` (global), `say_team "..."`
+/// (team), or randomised on each death.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CfgChatMode {
+    /// Always send to global chat (`say`).
+    #[default]
+    Global,
+    /// Always send to team chat (`say_team`).
+    Team,
+    /// Pick global or team randomly per death.
+    Random,
+}
+
 /// Persistent settings for the ImLag application.
 ///
 /// `serde` writes camelCase keys (matching the JS / TS frontend) but
@@ -29,21 +46,35 @@ pub struct AppConfig {
     )]
     pub only_self_death: bool,
 
-    /// Keys bound to the global-chat say cycle.
-    #[serde(
-        default = "default_global_keys",
-        alias = "BindKeys",
-        alias = "bind_keys"
-    )]
+    /// **Deprecated** — kept for backward-compatible loading of old configs.
+    /// New code should read [`trigger_key`](Self::trigger_key) instead.
+    #[serde(default, alias = "BindKeys", alias = "bind_keys")]
     pub bind_keys: Vec<String>,
 
-    /// Keys bound to the team-chat say cycle.
-    #[serde(
-        default = "default_team_keys",
-        alias = "TeamBindKeys",
-        alias = "team_bind_keys"
-    )]
+    /// **Deprecated** — kept for backward-compatible loading of old configs.
+    /// New code should read [`trigger_key`](Self::trigger_key) plus
+    /// [`cfg_chat_mode`](Self::cfg_chat_mode) instead.
+    #[serde(default, alias = "TeamBindKeys", alias = "team_bind_keys")]
     pub team_bind_keys: Vec<String>,
+
+    /// Single key bound to `exec imlag_say` in CFG mode. The cfg is empty
+    /// outside a death event, so pressing this key by accident is harmless.
+    ///
+    /// Serde default is the empty string so legacy configs without a
+    /// `triggerKey` field migrate from `bindKeys` / `teamBindKeys` in
+    /// [`Self::normalize`]; brand-new configs ride the [`Default`] impl
+    /// which seeds it with `"k"`.
+    #[serde(default, alias = "TriggerKey", alias = "trigger_key")]
+    pub trigger_key: String,
+
+    /// Channel selection strategy for CFG mode dispatches.
+    #[serde(
+        default,
+        alias = "CfgChatMode",
+        alias = "cfg_chat_mode",
+        alias = "ChatMode"
+    )]
+    pub cfg_chat_mode: CfgChatMode,
 
     /// Filesystem path to the Counter-Strike 2 install directory. Empty when
     /// auto-detection is desired.
@@ -84,7 +115,8 @@ pub struct AppConfig {
     )]
     pub auto_start_gsi: bool,
 
-    /// Prefer team-chat keys over global keys in CFG mode.
+    /// **Deprecated** — superseded by [`cfg_chat_mode`](Self::cfg_chat_mode).
+    /// `true` is migrated to [`CfgChatMode::Team`] on first load.
     #[serde(default, alias = "PreferTeamChat", alias = "prefer_team_chat")]
     pub prefer_team_chat: bool,
 }
@@ -92,11 +124,8 @@ pub struct AppConfig {
 fn default_true() -> bool {
     true
 }
-fn default_global_keys() -> Vec<String> {
-    vec!["k".into()]
-}
-fn default_team_keys() -> Vec<String> {
-    vec!["l".into()]
+fn default_trigger_key() -> String {
+    "k".into()
 }
 fn default_chat_key() -> String {
     "y".into()
@@ -113,8 +142,10 @@ impl Default for AppConfig {
         Self {
             player_names: Vec::new(),
             only_self_death: true,
-            bind_keys: default_global_keys(),
-            team_bind_keys: default_team_keys(),
+            bind_keys: Vec::new(),
+            team_bind_keys: Vec::new(),
+            trigger_key: default_trigger_key(),
+            cfg_chat_mode: CfgChatMode::default(),
             cs2_path: String::new(),
             use_cfg_mode: true,
             chat_key: default_chat_key(),
@@ -157,14 +188,30 @@ impl AppConfig {
         Ok(path)
     }
 
-    /// Coerce out-of-range / nonsense values back into safe defaults.
+    /// Coerce out-of-range / nonsense values back into safe defaults and
+    /// migrate deprecated fields into their replacements.
     pub fn normalize(&mut self) {
-        if self.bind_keys.is_empty() {
-            self.bind_keys = default_global_keys();
+        // Migrate legacy multi-key pools into `trigger_key`.
+        if self.trigger_key.trim().is_empty() {
+            self.trigger_key = self
+                .bind_keys
+                .iter()
+                .chain(self.team_bind_keys.iter())
+                .find_map(|k| {
+                    let t = k.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                })
+                .unwrap_or_else(default_trigger_key);
         }
-        if self.team_bind_keys.is_empty() {
-            self.team_bind_keys = default_team_keys();
+        // Migrate `prefer_team_chat=true` into `CfgChatMode::Team` once.
+        if self.prefer_team_chat && matches!(self.cfg_chat_mode, CfgChatMode::Global) {
+            self.cfg_chat_mode = CfgChatMode::Team;
         }
+
         if self.chat_key.trim().is_empty() {
             self.chat_key = default_chat_key();
         }
@@ -172,6 +219,14 @@ impl AppConfig {
             self.key_delay = default_key_delay();
         }
         self.language = normalize_language(&self.language);
+        // Constrain trigger_key to a single ASCII alphanumeric character.
+        let raw = self.trigger_key.trim().to_ascii_lowercase();
+        let valid = raw
+            .chars()
+            .next()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_string());
+        self.trigger_key = valid.unwrap_or_else(default_trigger_key);
     }
 }
 
@@ -193,18 +248,19 @@ mod tests {
         let cfg = AppConfig::default();
         let s = serde_json::to_string(&cfg).unwrap();
         let parsed: AppConfig = serde_json::from_str(&s).unwrap();
-        assert_eq!(parsed.bind_keys, vec!["k".to_string()]);
+        assert_eq!(parsed.trigger_key, "k");
+        assert_eq!(parsed.cfg_chat_mode, CfgChatMode::Global);
         assert!(parsed.only_self_death);
         assert_eq!(parsed.key_delay, 100);
     }
 
     #[test]
     fn legacy_pascal_case_keys_still_load() {
-        // Original Godot/C# config used PascalCase keys.
+        // Original Godot/C# config used PascalCase keys with multi-key pools.
         let json = r#"{
             "PlayerNames": ["alice"],
             "OnlySelfDeath": true,
-            "BindKeys": ["k","j"],
+            "BindKeys": ["j","k"],
             "TeamBindKeys": ["l"],
             "CS2Path": "C:/Steam/cs2",
             "UseCfgMode": false,
@@ -214,14 +270,25 @@ mod tests {
             "AutoStartGsi": false,
             "PreferTeamChat": true
         }"#;
-        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize();
         assert_eq!(cfg.player_names, vec!["alice"]);
-        assert_eq!(cfg.bind_keys, vec!["k", "j"]);
+        // First entry of the legacy pool wins.
+        assert_eq!(cfg.trigger_key, "j");
+        // PreferTeamChat → CfgChatMode::Team
+        assert_eq!(cfg.cfg_chat_mode, CfgChatMode::Team);
         assert_eq!(cfg.cs2_path, "C:/Steam/cs2");
         assert!(!cfg.use_cfg_mode);
         assert_eq!(cfg.chat_key, "u");
         assert_eq!(cfg.key_delay, 200);
         assert_eq!(cfg.language, "zh-TW");
+    }
+
+    #[test]
+    fn cfg_chat_mode_serializes_lowercase() {
+        let json = r#"{"cfgChatMode":"random"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.cfg_chat_mode, CfgChatMode::Random);
     }
 
     #[test]
@@ -232,5 +299,26 @@ mod tests {
         };
         cfg.normalize();
         assert_eq!(cfg.key_delay, 100);
+    }
+
+    #[test]
+    fn normalize_falls_back_when_trigger_key_is_garbage() {
+        let mut cfg = AppConfig {
+            trigger_key: "@@@".into(),
+            ..Default::default()
+        };
+        cfg.normalize();
+        assert_eq!(cfg.trigger_key, "k");
+    }
+
+    #[test]
+    fn normalize_picks_first_legacy_bind_key_when_trigger_empty() {
+        let mut cfg = AppConfig {
+            trigger_key: String::new(),
+            bind_keys: vec!["m".into()],
+            ..Default::default()
+        };
+        cfg.normalize();
+        assert_eq!(cfg.trigger_key, "m");
     }
 }

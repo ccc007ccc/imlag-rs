@@ -30,7 +30,7 @@ export function EngineProvider({ children }: { children: ReactNode }) {
   const [corpus, setCorpus] = useState<string[]>([]);
   const [stats, setStats] = useState<StatsSummary>({
     corpusCount: 0,
-    cfgGroupCount: 0,
+    cfgInstalled: false,
   });
   const [gsiRunning, setGsiRunning] = useState(false);
 

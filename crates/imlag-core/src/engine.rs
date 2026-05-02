@@ -182,22 +182,20 @@ impl Engine {
             };
 
             if snapshot.use_cfg_mode {
-                let key = if snapshot.prefer_team_chat {
-                    cfg_manager.random_team_key()
-                } else {
-                    cfg_manager.random_global_key()
-                };
-                let key_char = key.chars().next().unwrap_or('k');
+                let cm = cfg_manager.clone();
+                let in_team = cm.select_in_team_chat();
                 let ui_tx2 = ui_tx.clone();
                 let msg2 = message.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::platform::release_movement_keys();
-                    std::thread::sleep(std::time::Duration::from_millis(80));
-                    crate::platform::press_key(key_char, std::time::Duration::from_millis(60));
-                    let _ = ui_tx2.send(UiEvent::info(
-                        UiKind::ChatSent,
-                        i18n::t_args("status.message_sent", [msg2.as_str()].as_slice()),
-                    ));
+                tokio::task::spawn_blocking(move || match cm.dispatch(&msg2, in_team) {
+                    Ok(()) => {
+                        let _ = ui_tx2.send(UiEvent::info(
+                            UiKind::ChatSent,
+                            i18n::t_args("status.message_sent", [msg2.as_str()].as_slice()),
+                        ));
+                    }
+                    Err(err) => {
+                        let _ = ui_tx2.send(UiEvent::error(UiKind::Cfg, format!("{err}")));
+                    }
                 });
             } else {
                 let sender = sender.clone();

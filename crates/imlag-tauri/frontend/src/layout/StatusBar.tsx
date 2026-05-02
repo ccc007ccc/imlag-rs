@@ -51,7 +51,11 @@ export function StatusBar() {
       </span>
 
       <span className="shrink-0 text-fg-tertiary">
-        {t("stats.summary", stats.corpusCount, stats.cfgGroupCount).replace(/\n/g, " · ")}
+        {t(
+          "stats.summary",
+          stats.corpusCount,
+          stats.cfgInstalled ? t("cfg.status.ready") : t("cfg.status.not_ready"),
+        ).replace(/\n/g, " · ")}
       </span>
     </footer>
   );

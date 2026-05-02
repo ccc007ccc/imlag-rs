@@ -15,8 +15,8 @@ use tauri::State;
 pub struct StatsSummary {
     /// Total entries in the corpus.
     pub corpus_count: usize,
-    /// Number of generated key-bind groups (CFG mode).
-    pub cfg_group_count: usize,
+    /// Whether the dispatch cfg + autoexec block are currently installed.
+    pub cfg_installed: bool,
 }
 
 // ─── Configuration ────────────────────────────────────────────────────
@@ -134,13 +134,13 @@ pub fn corpus_import(state: State<'_, AppState>, path: String) -> Result<ImportR
 
 // ─── CFG mode ─────────────────────────────────────────────────────────
 
-/// Generate (or refresh) the per-key bind cfg files & autoexec.
+/// Generate (or refresh) the dispatch cfg and the autoexec bind.
 #[tauri::command]
-pub fn cfg_generate(state: State<'_, AppState>) -> Result<usize, String> {
+pub fn cfg_generate(state: State<'_, AppState>) -> Result<(), String> {
     state
         .engine
         .cfg_manager()
-        .apply()
+        .install()
         .map_err(|e| e.to_string())
 }
 
@@ -161,6 +161,6 @@ pub fn cfg_remove(state: State<'_, AppState>) -> Result<(), String> {
 pub fn stats_summary(state: State<'_, AppState>) -> StatsSummary {
     StatsSummary {
         corpus_count: state.engine.corpus().len(),
-        cfg_group_count: state.engine.cfg_manager().generated_group_count(),
+        cfg_installed: state.engine.cfg_manager().is_installed(),
     }
 }

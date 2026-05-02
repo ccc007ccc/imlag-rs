@@ -13,8 +13,8 @@ use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE, HWN
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, MapVirtualKeyW, VkKeyScanW, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC,
-    VIRTUAL_KEY,
+    keybd_event, GetKeyboardState, MapVirtualKeyW, VkKeyScanW, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    MAPVK_VK_TO_VSC, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -96,6 +96,39 @@ pub fn release_movement_keys() {
         key_event(*k, true);
     }
     sleep(Duration::from_millis(50));
+}
+
+/// Release every key the OS currently considers pressed.
+///
+/// Walks the 256-entry keyboard state from `GetKeyboardState`, sends a
+/// `KEYUP` for each VK whose high bit is set. Avoids spamming `keyup` for
+/// keys the user wasn't holding, so IME / modifier toggle state stays clean.
+///
+/// Skips VK 0 (unused) and the 0xE? OEM cluster's well-known bogus codes
+/// that some keyboards report as stuck.
+pub fn release_all_keys() {
+    let mut state = [0u8; 256];
+    if unsafe { GetKeyboardState(&mut state) }.is_err() {
+        // Fallback to the smaller well-known set if the syscall fails.
+        release_movement_keys();
+        return;
+    }
+    let mut released = 0u32;
+    for vk in 1u16..=254u16 {
+        // Skip VK_PACKET (0xE7) — it isn't a physical key, it's used for
+        // injected unicode strokes and "releasing" it can produce stray
+        // characters in the focused control.
+        if vk == 0xE7 {
+            continue;
+        }
+        if state[vk as usize] & 0x80 != 0 {
+            key_event(vk as u8, true);
+            released += 1;
+        }
+    }
+    if released > 0 {
+        sleep(Duration::from_millis(30));
+    }
 }
 
 /// Type the standard "select all + delete" sequence into the focused control.

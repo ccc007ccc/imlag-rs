@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { Button, Card, Input, Toggle } from "@/components";
-import { cn } from "@/lib/cn";
+import { Button, Card, Input, ModeOption, Toggle } from "@/components";
 import { useEngine } from "@/lib/engine";
 import { useT } from "@/lib/i18n";
 
@@ -49,7 +48,7 @@ export function ChatModeView() {
               <Input
                 value={chatKey}
                 onChange={(e) => setKeyDraft(e.target.value)}
-                className="!w-20 text-center font-mono"
+                className="w-20! text-center font-mono"
                 maxLength={1}
               />
               <Button variant="standard" size="sm" onClick={applyChatKey}>
@@ -66,7 +65,7 @@ export function ChatModeView() {
               <Input
                 value={delay}
                 onChange={(e) => setDelayDraft(e.target.value)}
-                className="!w-24"
+                className="w-24!"
                 inputMode="numeric"
               />
               <Button variant="standard" size="sm" onClick={applyDelay}>
@@ -109,51 +108,5 @@ export function ChatModeView() {
         </div>
       </Card>
     </div>
-  );
-}
-
-interface ModeOptionProps {
-  selected: boolean;
-  label: string;
-  description: string;
-  onSelect(): void;
-}
-
-function ModeOption({ selected, label, description, onSelect }: ModeOptionProps) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      data-reveal
-      className={cn(
-        "rounded-md border px-4 py-3 text-left transition-colors cursor-default",
-        "duration-(--duration-fast) ease-(--ease-fluent)",
-        selected
-          ? "bg-accent-tertiary border-[color:var(--color-accent-base)]/55"
-          : "bg-fill-control border-stroke-control hover:bg-fill-control-hover",
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <span
-          className={cn(
-            "inline-block h-3.5 w-3.5 rounded-full border",
-            selected
-              ? "border-[color:var(--color-accent-base)] bg-accent-base"
-              : "border-stroke-control-strong",
-          )}
-        />
-        <span
-          className={cn(
-            "text-[13px] font-semibold",
-            selected ? "text-fg-accent" : "text-fg-primary",
-          )}
-        >
-          {label}
-        </span>
-      </div>
-      <p className="mt-1.5 text-[12px] text-fg-tertiary leading-snug">
-        {description}
-      </p>
-    </button>
   );
 }

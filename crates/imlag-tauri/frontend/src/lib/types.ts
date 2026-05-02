@@ -3,10 +3,18 @@
 // `imlag_core::AppConfig`, `imlag_tauri::commands::StatsSummary`,
 // `imlag_tauri::events::UiEventDto`.
 
+export type CfgChatMode = "global" | "team" | "random";
+
 export interface AppConfig {
   playerNames: string[];
   onlySelfDeath: boolean;
+  /** Single key bound to `exec imlag_say` in CFG mode. */
+  triggerKey: string;
+  /** Channel selection strategy for CFG dispatches. */
+  cfgChatMode: CfgChatMode;
+  /** @deprecated Replaced by `triggerKey`; kept for legacy config files. */
   bindKeys: string[];
+  /** @deprecated Replaced by `triggerKey` + `cfgChatMode`. */
   teamBindKeys: string[];
   cs2Path: string;
   useCfgMode: boolean;
@@ -16,6 +24,7 @@ export interface AppConfig {
   keyDelay: number;
   language: string;
   autoStartGsi: boolean;
+  /** @deprecated Migrated into `cfgChatMode`. */
   preferTeamChat: boolean;
 }
 
@@ -44,7 +53,7 @@ export interface UiEventDto {
 
 export interface StatsSummary {
   corpusCount: number;
-  cfgGroupCount: number;
+  cfgInstalled: boolean;
 }
 
 export type Tab = "general" | "cfg" | "chat" | "corpus";

@@ -45,7 +45,9 @@ impl ChatMessageSender {
         if !snap.skip_window_check && !platform::is_cs2_active() {
             return Err(SendError::NotForeground);
         }
-        platform::release_movement_keys();
+        // Release every key the OS thinks the player is holding so movement
+        // / lean / crouch keys don't get baked into the chat box.
+        platform::release_all_keys();
         std::thread::sleep(Duration::from_millis(100));
 
         platform::set_clipboard_text(message).map_err(|e| SendError::Clipboard(e.to_string()))?;

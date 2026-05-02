@@ -1,102 +1,22 @@
-import { useState, type KeyboardEvent } from "react";
-import { Button, Card, Input, Toggle } from "@/components";
-import { cn } from "@/lib/cn";
+import { useState } from "react";
+import { Button, Card, Input, ModeOption } from "@/components";
 import { useEngine } from "@/lib/engine";
 import { useT } from "@/lib/i18n";
 import { api } from "@/lib/api";
+import type { CfgChatMode } from "@/lib/types";
 
-type KeyKind = "global" | "team";
-
-interface KeyEditorProps {
-  kind: KeyKind;
-  sample: string;
-  summaryKey: "cfg.current_global_keys" | "cfg.current_team_keys";
-}
-
-function KeyEditor({ kind, sample, summaryKey }: KeyEditorProps) {
-  const { config, patchConfig } = useEngine();
-  const { t } = useT();
-  const [draft, setDraft] = useState("");
-  if (!config) return null;
-
-  const list = kind === "global" ? config.bindKeys : config.teamBindKeys;
-  const field = kind === "global" ? "bindKeys" : "teamBindKeys";
-
-  const isValid = (s: string) =>
-    s.length === 1 && /[a-z0-9]/.test(s);
-
-  const add = async () => {
-    const trimmed = draft.trim().toLowerCase();
-    if (!isValid(trimmed)) return;
-    if (list.includes(trimmed)) {
-      setDraft("");
-      return;
-    }
-    await patchConfig(field, [...list, trimmed]);
-    setDraft("");
-  };
-
-  const remove = async (k: string) => {
-    await patchConfig(field, list.filter((x) => x !== k));
-  };
-
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      add();
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-2">
-      <p className="text-[12px] text-fg-secondary">
-        {t(summaryKey, list.join(", "))}
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          value={draft}
-          maxLength={1}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={t("cfg.key_placeholder", sample)}
-          className="!w-24"
-        />
-        <Button variant="accent" size="sm" onClick={add}>
-          {t("common.add")}
-        </Button>
-
-        <div className="ml-2 flex flex-wrap gap-1">
-          {list.map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => remove(k)}
-              className={cn(
-                "inline-flex h-6 min-w-6 items-center justify-center px-2",
-                "text-[12px] font-mono rounded-sm border",
-                "bg-fill-control border-stroke-control text-fg-primary",
-                "hover:bg-error hover:text-fg-on-accent hover:border-transparent",
-                "transition-colors duration-(--duration-fast) ease-(--ease-fluent)",
-              )}
-              title={t("common.delete")}
-            >
-              {k}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
+const MODE_ORDER: CfgChatMode[] = ["global", "team", "random"];
 
 export function CfgModeView() {
   const { config, patchConfig } = useEngine();
   const { t } = useT();
   const [pathDraft, setPathDraft] = useState<string | null>(null);
+  const [keyDraft, setKeyDraft] = useState<string | null>(null);
 
   if (!config) return null;
 
   const path = pathDraft ?? config.cs2Path;
+  const trigger = keyDraft ?? config.triggerKey;
 
   const applyPath = async () => {
     await patchConfig("cs2Path", path.trim());
@@ -104,15 +24,15 @@ export function CfgModeView() {
   };
 
   const detectPath = async () => {
-    // The auto-detect logic lives in CfgManager and emits its own status
-    // events; here we only need to refresh the displayed value after.
-    try {
-      // No dedicated command exists yet, but the UI can prompt the user
-      // to paste the path manually. Reserved for a future command.
-      console.warn("auto-detect not wired up yet");
-    } catch (err) {
-      console.error(err);
-    }
+    // Reserved for a future Tauri command — auto-detect lives in CfgManager.
+    console.warn("auto-detect not wired up yet");
+  };
+
+  const applyTriggerKey = async () => {
+    const v = trigger.trim().toLowerCase();
+    if (!v || !/^[a-z0-9]$/.test(v)) return;
+    await patchConfig("triggerKey", v);
+    setKeyDraft(null);
   };
 
   const onGenerate = async () => {
@@ -155,24 +75,44 @@ export function CfgModeView() {
             {t("cfg.detect_path")}
           </Button>
         </div>
-        <div className="mt-3">
-          <Toggle
-            checked={config.preferTeamChat}
-            onChange={(v) => patchConfig("preferTeamChat", v)}
-            label={t("cfg.prefer_team_chat")}
+      </Card>
+
+      <Card title={t("cfg.trigger_key")}>
+        <p className="mb-2 text-[12px] text-fg-secondary">
+          {t("cfg.trigger_hint")}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            value={trigger}
+            maxLength={1}
+            onChange={(e) => setKeyDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                applyTriggerKey();
+              }
+            }}
+            className="w-20! text-center font-mono"
+            placeholder="k"
           />
+          <Button variant="accent" size="sm" onClick={applyTriggerKey}>
+            {t("cfg.apply_key")}
+          </Button>
         </div>
       </Card>
 
-      <Card title={t("cfg.global_keys")}>
-        <KeyEditor
-          kind="global"
-          sample="k"
-          summaryKey="cfg.current_global_keys"
-        />
-      </Card>
-      <Card title={t("cfg.team_keys")}>
-        <KeyEditor kind="team" sample="l" summaryKey="cfg.current_team_keys" />
+      <Card title={t("cfg.mode.section")}>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {MODE_ORDER.map((mode) => (
+            <ModeOption
+              key={mode}
+              selected={config.cfgChatMode === mode}
+              label={t(`cfg.mode.${mode}`)}
+              description={t(`cfg.mode.${mode}_description`)}
+              onSelect={() => patchConfig("cfgChatMode", mode)}
+            />
+          ))}
+        </div>
       </Card>
 
       <div className="flex justify-end gap-2">

@@ -19,6 +19,9 @@ pub fn key_up(_ch: char) {}
 pub fn release_movement_keys() {}
 
 /// Stub.
+pub fn release_all_keys() {}
+
+/// Stub.
 pub fn clear_input(_delay: Duration) {}
 
 /// Stub.

@@ -1,16 +1,40 @@
-//! CFG mode — generate per-message `.cfg` files and patch `autoexec.cfg` so
-//! pressing one key in CS2 cycles through the corpus.
+//! CFG mode — install a single dispatch cfg into the CS2 cfg directory and
+//! rewrite it on each death event.
+//!
+//! Earlier versions of ImLag generated a fan-out of `imlag_say_*.cfg` files
+//! and bound multiple keys, each pointing at a fixed line of corpus. That
+//! exposed the player to **accidental disclosure**: any stray press of a
+//! bound key would fire a preset message in chat.
+//!
+//! The current design keeps a **single** `imlag_say.cfg`, empty by default.
+//! The trigger key is bound to `exec imlag_say`. When the player dies,
+//! [`CfgManager::dispatch`] rewrites the cfg with a `say` / `say_team` line,
+//! presses the trigger, waits long enough for CS2 to finish exec, then
+//! truncates the cfg back to a comment-only stub. Pressing the trigger
+//! between deaths is harmless.
 
 use crate::chat::ChatMessageManager;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, CfgChatMode};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 const AUTOEXEC_BACKUP_SUFFIX: &str = ".imlag_backup";
 const COMMENT_START: &str = "// --- ImLag Auto-Bind Start ---";
 const COMMENT_END: &str = "// --- ImLag Auto-Bind End ---";
+const SAY_CFG_FILE: &str = "imlag_say.cfg";
+const EMPTY_SAY_CFG_BODY: &str =
+    "// ImLag dispatch slot — content is rewritten at runtime.\n// Pressing the trigger key while this file is empty is a no-op.\n";
+
+/// How long to wait between rewriting the cfg and clearing it again.
+///
+/// CS2 needs to read the file after we trigger `exec` from outside; a short
+/// sleep avoids racing the engine. 300 ms covers worst-case console
+/// processing while still allowing a roughly 3-deaths-per-second cadence.
+const DISPATCH_CLEAR_DELAY: Duration = Duration::from_millis(300);
 
 /// Errors produced while reading or writing CS2 cfg files.
 #[derive(Debug, thiserror::Error)]
@@ -22,7 +46,7 @@ pub enum CfgError {
     /// The CS2 install directory exists but `game/csgo/cfg` is missing.
     #[error("CS2 cfg directory not found at {0}")]
     CfgDirMissing(PathBuf),
-    /// The corpus is empty so nothing can be generated.
+    /// The corpus is empty so nothing can be dispatched.
     #[error("corpus is empty")]
     EmptyCorpus,
     /// Underlying I/O error.
@@ -31,17 +55,25 @@ pub enum CfgError {
 }
 
 /// CFG-mode controller. Wires together [`AppConfig`] and the corpus
-/// ([`ChatMessageManager`]) to generate the family of `.cfg` files CS2 reads.
+/// ([`ChatMessageManager`]) to manage the single dispatch cfg CS2 reads.
 #[derive(Clone)]
 pub struct CfgManager {
     config: Arc<parking_lot::RwLock<AppConfig>>,
+    /// Serialises concurrent calls to [`Self::dispatch`] so we never have two
+    /// threads writing or clearing the cfg at once.
+    dispatch_lock: Arc<parking_lot::Mutex<()>>,
+    #[allow(dead_code)]
     corpus: ChatMessageManager,
 }
 
 impl CfgManager {
     /// Create a controller bound to the given shared config and corpus.
     pub fn new(config: Arc<parking_lot::RwLock<AppConfig>>, corpus: ChatMessageManager) -> Self {
-        Self { config, corpus }
+        Self {
+            config,
+            dispatch_lock: Arc::new(parking_lot::Mutex::new(())),
+            corpus,
+        }
     }
 
     /// Resolve the absolute path of the CS2 cfg directory.
@@ -76,63 +108,36 @@ impl CfgManager {
         Ok(install)
     }
 
-    /// Pick a random global-chat key out of `config.bind_keys`.
-    pub fn random_global_key(&self) -> String {
-        let cfg = self.config.read();
-        pick_random(&cfg.bind_keys).unwrap_or_else(|| "k".into())
-    }
-
-    /// Pick a random team-chat key out of `config.team_bind_keys`.
-    pub fn random_team_key(&self) -> String {
-        let cfg = self.config.read();
-        pick_random(&cfg.team_bind_keys).unwrap_or_else(|| "l".into())
-    }
-
-    /// Generate the `imlag_say_global_*.cfg` / `imlag_say_team_*.cfg` files
-    /// and the two selector cfgs.
-    pub fn generate_files(&self) -> Result<usize, CfgError> {
-        let messages = self.corpus.all();
-        if messages.is_empty() {
-            return Err(CfgError::EmptyCorpus);
+    /// Decide whether the next dispatch should target team chat.
+    ///
+    /// Reads the configured [`CfgChatMode`]. For [`CfgChatMode::Random`] a
+    /// fresh coin flip is performed on every call.
+    pub fn select_in_team_chat(&self) -> bool {
+        match self.config.read().cfg_chat_mode {
+            CfgChatMode::Global => false,
+            CfgChatMode::Team => true,
+            CfgChatMode::Random => fastrand::bool(),
         }
+    }
+
+    /// Install the dispatch cfg + autoexec bind. Idempotent — calling it
+    /// repeatedly leaves the cfg directory in the same state.
+    ///
+    /// Replaces the legacy preset-pool layout: any stale `imlag_say_*.cfg`
+    /// or selector files from prior versions are also cleared.
+    pub fn install(&self) -> Result<(), CfgError> {
         let cfg_dir = self.resolve_cfg_dir()?;
         if !cfg_dir.is_dir() {
             return Err(CfgError::CfgDirMissing(cfg_dir));
         }
-
-        delete_generated(&cfg_dir)?;
-
-        let mut shuffled = messages.clone();
-        shuffle_in_place(&mut shuffled);
-        for (i, msg) in shuffled.iter().enumerate() {
-            write_cfg_line(
-                &cfg_dir,
-                &format!("imlag_say_global_{}.cfg", i + 1),
-                "ImLag Global Chat CFG",
-                msg,
-                "say",
-            )?;
-        }
-
-        let mut shuffled = messages.clone();
-        shuffle_in_place(&mut shuffled);
-        for (i, msg) in shuffled.iter().enumerate() {
-            write_cfg_line(
-                &cfg_dir,
-                &format!("imlag_say_team_{}.cfg", i + 1),
-                "ImLag Team Chat CFG",
-                msg,
-                "say_team",
-            )?;
-        }
-
-        write_selector(&cfg_dir, "global", messages.len())?;
-        write_selector(&cfg_dir, "team", messages.len())?;
-        Ok(messages.len())
+        clear_legacy_files(&cfg_dir)?;
+        write_empty_say_cfg(&cfg_dir)?;
+        self.update_autoexec()?;
+        Ok(())
     }
 
-    /// Patch `autoexec.cfg` so the configured keys cycle through the
-    /// generated say cfgs. A backup is taken on the first run.
+    /// Patch `autoexec.cfg` so the configured trigger key fires
+    /// `exec imlag_say`. A backup is taken on the first run.
     pub fn update_autoexec(&self) -> Result<(), CfgError> {
         let cfg_dir = self.resolve_cfg_dir()?;
         let autoexec = cfg_dir.join("autoexec.cfg");
@@ -160,16 +165,60 @@ impl CfgManager {
         Ok(())
     }
 
-    /// Convenience: [`generate_files`](Self::generate_files) followed by
-    /// [`update_autoexec`](Self::update_autoexec).
-    pub fn apply(&self) -> Result<usize, CfgError> {
-        let n = self.generate_files()?;
-        self.update_autoexec()?;
-        Ok(n)
+    /// `true` iff the dispatch cfg exists and the autoexec contains the
+    /// ImLag-managed block.
+    pub fn is_installed(&self) -> bool {
+        let Ok(cfg_dir) = self.resolve_cfg_dir() else {
+            return false;
+        };
+        if !cfg_dir.join(SAY_CFG_FILE).is_file() {
+            return false;
+        }
+        match fs::read_to_string(cfg_dir.join("autoexec.cfg")) {
+            Ok(s) => s.contains(COMMENT_START) && s.contains(COMMENT_END),
+            Err(_) => false,
+        }
     }
 
-    /// Restore CS2 to its pre-ImLag state — drops every `imlag_*.cfg` and
-    /// rolls back `autoexec.cfg` to its backup (if any).
+    /// Write a `say "..."` / `say_team "..."` line into the dispatch cfg,
+    /// press the trigger key once, then clear the cfg back to a no-op stub.
+    ///
+    /// Calls are serialised by an internal mutex; if a second death lands
+    /// while a previous dispatch is still running, the second call simply
+    /// queues until the cfg is clean.
+    pub fn dispatch(&self, message: &str, in_team_chat: bool) -> Result<(), CfgError> {
+        let _guard = self.dispatch_lock.lock();
+
+        let cfg_dir = self.resolve_cfg_dir()?;
+        let cfg_path = cfg_dir.join(SAY_CFG_FILE);
+
+        let snapshot = self.config.read().clone();
+        let trigger_char = snapshot
+            .trigger_key
+            .chars()
+            .next()
+            .unwrap_or('k')
+            .to_ascii_lowercase();
+
+        write_dispatch_line(&cfg_path, message, in_team_chat)?;
+
+        // Release any keys the player might still be holding so the
+        // game-side `bind` actually fires when we synthesise the press.
+        crate::platform::release_all_keys();
+        sleep(Duration::from_millis(40));
+
+        crate::platform::press_key(trigger_char, Duration::from_millis(60));
+
+        // Give CS2 a beat to finish exec'ing the file before we wipe it.
+        sleep(DISPATCH_CLEAR_DELAY);
+
+        write_empty_say_cfg(&cfg_dir)?;
+        Ok(())
+    }
+
+    /// Restore CS2 to its pre-ImLag state — drop the dispatch cfg, any
+    /// legacy cfg files from older versions, and roll back `autoexec.cfg`
+    /// to its backup (if any).
     pub fn restore(&self) -> Result<(), CfgError> {
         let cfg_dir = self.resolve_cfg_dir()?;
         let autoexec = cfg_dir.join("autoexec.cfg");
@@ -185,56 +234,9 @@ impl CfgManager {
             remove_imlag_section(&mut lines);
             fs::write(&autoexec, lines.join("\n") + "\n")?;
         }
-        for entry in fs::read_dir(&cfg_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if let Some(s) = name.to_str() {
-                if s.starts_with("imlag_") && s.ends_with(".cfg") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
+        clear_legacy_files(&cfg_dir)?;
+        let _ = fs::remove_file(cfg_dir.join(SAY_CFG_FILE));
         Ok(())
-    }
-
-    /// Number of generated say-cfg pairs (`min(global_count, team_count)`).
-    pub fn generated_group_count(&self) -> usize {
-        let cfg_dir = match self.resolve_cfg_dir() {
-            Ok(p) => p,
-            Err(_) => return 0,
-        };
-        let mut g = 0usize;
-        let mut t = 0usize;
-        if let Ok(rd) = fs::read_dir(&cfg_dir) {
-            for e in rd.flatten() {
-                if let Some(name) = e.file_name().to_str() {
-                    if name.ends_with("_selector.cfg") {
-                        continue;
-                    }
-                    if name.starts_with("imlag_say_global_") && name.ends_with(".cfg") {
-                        g += 1;
-                    }
-                    if name.starts_with("imlag_say_team_") && name.ends_with(".cfg") {
-                        t += 1;
-                    }
-                }
-            }
-        }
-        g.min(t)
-    }
-}
-
-fn pick_random(items: &[String]) -> Option<String> {
-    if items.is_empty() {
-        None
-    } else {
-        Some(items[fastrand::usize(..items.len())].clone())
-    }
-}
-
-fn shuffle_in_place(v: &mut [String]) {
-    for i in (1..v.len()).rev() {
-        v.swap(i, fastrand::usize(..=i));
     }
 }
 
@@ -242,62 +244,37 @@ fn escape_for_cfg(message: &str) -> String {
     message.replace('"', "\"\"").replace(';', "")
 }
 
-fn write_cfg_line(
-    cfg_dir: &Path,
-    file_name: &str,
-    header: &str,
-    msg: &str,
-    verb: &str,
-) -> std::io::Result<()> {
-    let escaped = escape_for_cfg(msg);
-    let mut f = fs::File::create(cfg_dir.join(file_name))?;
-    writeln!(f, "// {header}")?;
-    writeln!(f, "// Message: {msg}")?;
+fn write_empty_say_cfg(cfg_dir: &Path) -> std::io::Result<()> {
+    let path = cfg_dir.join(SAY_CFG_FILE);
+    fs::write(path, EMPTY_SAY_CFG_BODY)
+}
+
+fn write_dispatch_line(path: &Path, message: &str, in_team_chat: bool) -> std::io::Result<()> {
+    let escaped = escape_for_cfg(message);
+    let verb = if in_team_chat { "say_team" } else { "say" };
+    let mut f = fs::File::create(path)?;
+    writeln!(f, "// ImLag dispatch — generated at runtime")?;
     writeln!(f, "{verb} \"{escaped}\"")?;
     Ok(())
 }
 
-fn write_selector(cfg_dir: &Path, kind: &str, count: usize) -> std::io::Result<()> {
-    if count == 0 {
+/// Remove every imlag-generated cfg from previous installs (preset pool +
+/// selectors) so install() leaves only the new single dispatch file behind.
+fn clear_legacy_files(cfg_dir: &Path) -> std::io::Result<()> {
+    let Ok(rd) = fs::read_dir(cfg_dir) else {
         return Ok(());
-    }
-    let path = cfg_dir.join(format!("imlag_say_{kind}_selector.cfg"));
-    let mut f = fs::File::create(path)?;
-    writeln!(f, "// ImLag {} Chat Selector CFG", capitalize(kind))?;
-    writeln!(f, "// Cycles through {count} {kind} message CFGs.")?;
-    writeln!(f)?;
-    for i in 1..=count {
-        let next = (i % count) + 1;
-        writeln!(
-            f,
-            "alias imlag_{kind}_say_{i} \"exec imlag_say_{kind}_{i}; alias imlag_do_{kind}_say imlag_{kind}_say_{next}\""
-        )?;
-    }
-    writeln!(f)?;
-    writeln!(f, "alias imlag_do_{kind}_say imlag_{kind}_say_1")?;
-    Ok(())
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-fn delete_generated(cfg_dir: &Path) -> std::io::Result<()> {
-    for entry in fs::read_dir(cfg_dir)? {
-        let entry = entry?;
-        if let Some(s) = entry.file_name().to_str() {
-            if s.ends_with("_selector.cfg") {
-                continue;
-            }
-            if (s.starts_with("imlag_say_global_") || s.starts_with("imlag_say_team_"))
-                && s.ends_with(".cfg")
-            {
-                let _ = fs::remove_file(entry.path());
-            }
+    };
+    for entry in rd.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // Keep the new dispatch slot — we'll rewrite it ourselves.
+        if name == SAY_CFG_FILE {
+            continue;
+        }
+        // Anything else with the imlag_say_ prefix is a stale preset.
+        if name.starts_with("imlag_say_") && name.ends_with(".cfg") {
+            let _ = fs::remove_file(entry.path());
         }
     }
     Ok(())
@@ -319,28 +296,29 @@ fn remove_imlag_section(lines: &mut Vec<String>) {
     if let (Some(s), Some(e)) = (start, end) {
         lines.drain(s..=e);
     }
+    // Stamp out any orphaned legacy lines that escaped the comment block
+    // (older versions wrote selector exec calls outside the markers).
     lines.retain(|l| {
         let s = l.trim();
         !s.contains("exec imlag_say_global_selector")
             && !s.contains("exec imlag_say_team_selector")
             && !s.contains("exec imlag_say_selector")
+            && !s.contains("imlag_do_global_say")
+            && !s.contains("imlag_do_team_say")
     });
 }
 
 fn add_imlag_section(lines: &mut Vec<String>, cfg: &AppConfig) {
+    let trigger = cfg.trigger_key.chars().next().unwrap_or('k');
     lines.push(String::new());
     lines.push(COMMENT_START.into());
-    lines.push("// This block is automatically managed by ImLag".into());
-    lines.push("exec imlag_say_global_selector".into());
-    lines.push("exec imlag_say_team_selector".into());
-    for k in &cfg.bind_keys {
-        lines.push(format!("bind \"{k}\" \"imlag_do_global_say\""));
-        lines.push(format!("echo \"ImLag: '{k}' bound to global chat.\""));
-    }
-    for k in &cfg.team_bind_keys {
-        lines.push(format!("bind \"{k}\" \"imlag_do_team_say\""));
-        lines.push(format!("echo \"ImLag: '{k}' bound to team chat.\""));
-    }
+    lines.push("// This block is automatically managed by ImLag.".into());
+    lines.push("// The dispatch cfg is empty until ImLag rewrites it on a".into());
+    lines.push("// death event, so pressing the trigger by hand is a no-op.".into());
+    lines.push(format!("bind \"{trigger}\" \"exec imlag_say\""));
+    lines.push(format!(
+        "echo \"ImLag: '{trigger}' bound to imlag_say.cfg\""
+    ));
     lines.push(COMMENT_END.into());
     lines.push(String::new());
     lines.retain(|l| !l.trim().eq_ignore_ascii_case("host_writeconfig"));
@@ -357,17 +335,75 @@ mod tests {
     }
 
     #[test]
-    fn imlag_section_is_round_trippable() {
-        let cfg = AppConfig::default();
+    fn imlag_section_round_trips_with_trigger_key() {
+        let cfg = AppConfig {
+            trigger_key: "j".into(),
+            ..AppConfig::default()
+        };
         let mut lines = vec!["echo legacy".into()];
         add_imlag_section(&mut lines, &cfg);
         assert!(lines
             .iter()
-            .any(|l| l.contains("exec imlag_say_global_selector")));
+            .any(|l| l.contains("bind \"j\" \"exec imlag_say\"")));
         remove_imlag_section(&mut lines);
-        assert!(!lines
-            .iter()
-            .any(|l| l.contains("imlag_say_global_selector")));
+        assert!(!lines.iter().any(|l| l.contains("imlag_say")));
         assert!(lines.iter().any(|l| l == "echo legacy"));
+    }
+
+    #[test]
+    fn remove_imlag_section_strips_orphaned_legacy_lines() {
+        let mut lines = vec![
+            "echo before".into(),
+            "exec imlag_say_global_selector".into(),
+            "bind \"k\" \"imlag_do_global_say\"".into(),
+            "echo after".into(),
+        ];
+        remove_imlag_section(&mut lines);
+        assert_eq!(lines, vec!["echo before".to_string(), "echo after".into()]);
+    }
+
+    #[test]
+    fn write_dispatch_line_distinguishes_global_and_team() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SAY_CFG_FILE);
+
+        write_dispatch_line(&path, "lag bro", false).unwrap();
+        let global = fs::read_to_string(&path).unwrap();
+        assert!(global.contains("say \"lag bro\""));
+        assert!(!global.contains("say_team"));
+
+        write_dispatch_line(&path, "ez", true).unwrap();
+        let team = fs::read_to_string(&path).unwrap();
+        assert!(team.contains("say_team \"ez\""));
+    }
+
+    #[test]
+    fn write_empty_say_cfg_produces_comment_only_body() {
+        let dir = tempfile::tempdir().unwrap();
+        write_empty_say_cfg(dir.path()).unwrap();
+        let body = fs::read_to_string(dir.path().join(SAY_CFG_FILE)).unwrap();
+        assert!(body.contains("dispatch slot"));
+        assert!(!body.contains("say "));
+    }
+
+    #[test]
+    fn clear_legacy_files_removes_pool_but_keeps_dispatch_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        // Stale preset-pool files.
+        fs::write(dir.path().join("imlag_say_global_1.cfg"), "say a").unwrap();
+        fs::write(dir.path().join("imlag_say_team_2.cfg"), "say_team b").unwrap();
+        fs::write(dir.path().join("imlag_say_global_selector.cfg"), "alias").unwrap();
+        // Current dispatch slot.
+        fs::write(dir.path().join(SAY_CFG_FILE), "// keep").unwrap();
+        // Unrelated cfg.
+        fs::write(dir.path().join("user_keybinds.cfg"), "bind w +forward").unwrap();
+
+        clear_legacy_files(dir.path()).unwrap();
+
+        assert!(!dir.path().join("imlag_say_global_1.cfg").is_file());
+        assert!(!dir.path().join("imlag_say_team_2.cfg").is_file());
+        assert!(!dir.path().join("imlag_say_global_selector.cfg").is_file());
+        assert!(dir.path().join(SAY_CFG_FILE).is_file());
+        assert!(dir.path().join("user_keybinds.cfg").is_file());
     }
 }
