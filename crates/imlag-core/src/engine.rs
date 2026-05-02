@@ -9,7 +9,7 @@ use crate::i18n;
 use crate::sender::ChatMessageSender;
 
 use cs2_gsi::cfg::GsiCfg;
-use cs2_gsi::events::PlayerDied;
+use cs2_gsi::events::{PlayerDied, PlayerGotKill};
 use cs2_gsi::GameStateListener;
 
 use parking_lot::RwLock;
@@ -20,13 +20,14 @@ use tokio::sync::broadcast;
 
 /// Default port the listener binds to.
 ///
-/// Picked to dodge the usual suspects: 3000/4000/8000/8080 are dev-server
-/// territory and collide constantly; 49152+ is the OS's ephemeral range
-/// (a long-lived listener there can race against outbound source-port
-/// allocation). 47474 sits in the IANA registered range, isn't assigned
-/// to anything, and isn't used by other GSI tooling — so a fresh CS2
-/// install with no other tools running should bind cleanly.
-pub const DEFAULT_PORT: u16 = 47474;
+/// Tried 47474 first (IANA registered range, no known squatters); but
+/// the user reports it's persistently held on at least one machine,
+/// almost certainly by a security tool / driver that opens it
+/// transparently to scan. 57534 is in the OS ephemeral range (so a
+/// stray outbound connection *could* get assigned to it), but the
+/// fallback walk in [`start_gsi`] makes that recoverable, and on the
+/// affected machine 57534 has been observed to bind cleanly.
+pub const DEFAULT_PORT: u16 = 57534;
 
 /// How many ports immediately above [`DEFAULT_PORT`] to try before
 /// asking the OS to assign one. Five gives generous head-room without
@@ -195,70 +196,157 @@ impl Engine {
     }
 
     fn attach_handlers(&self) {
-        let config = self.config.clone();
-        let corpus = self.corpus.clone();
-        let sender = self.sender.clone();
-        let cfg_manager = self.cfg_manager.clone();
-        let ui_tx = self.ui_tx.clone();
+        // PlayerDied — fires when the GSI-visible player dies. With
+        // only_self_death=true we additionally gate on player_names so
+        // teammates / spectated bots don't fire chat replies.
+        {
+            let config = self.config.clone();
+            let corpus = self.corpus.clone();
+            let sender = self.sender.clone();
+            let cfg_manager = self.cfg_manager.clone();
+            let ui_tx = self.ui_tx.clone();
 
-        self.listener.on(move |e: &PlayerDied| {
-            let snapshot = config.read().clone();
-            let dead_name = e.player.name.clone();
+            self.listener.on(move |e: &PlayerDied| {
+                let snapshot = config.read().clone();
+                let dead_name = e.player.name.clone();
 
-            let _ = ui_tx.send(UiEvent::info(
-                UiKind::PlayerDeath,
-                i18n::t_args("status.player_dead", [dead_name.as_str()].as_slice()),
-            ));
+                let _ = ui_tx.send(UiEvent::info(
+                    UiKind::PlayerDeath,
+                    i18n::t_args("status.player_dead", [dead_name.as_str()].as_slice()),
+                ));
 
-            // Optional: only trigger when one of our watched names died.
-            if snapshot.only_self_death {
-                let watched = snapshot
-                    .player_names
-                    .iter()
-                    .map(|s| s.trim().to_ascii_lowercase());
-                let dead_low = dead_name.trim().to_ascii_lowercase();
-                if !watched.into_iter().any(|w| w == dead_low) {
+                // "Only fire on watched-list deaths" — when the toggle
+                // is on we filter; when it's off, every PlayerDied is
+                // a candidate (and PlayerGotKill below adds kills too).
+                if snapshot.only_self_death {
+                    let watched = snapshot
+                        .player_names
+                        .iter()
+                        .map(|s| s.trim().to_ascii_lowercase());
+                    let dead_low = dead_name.trim().to_ascii_lowercase();
+                    if !watched.into_iter().any(|w| w == dead_low) {
+                        return;
+                    }
+                }
+
+                dispatch_chat_reply(
+                    &snapshot,
+                    &corpus,
+                    &cfg_manager,
+                    &sender,
+                    &ui_tx,
+                    DispatchTrigger::Death,
+                );
+            });
+        }
+
+        // PlayerGotKill — only meaningful when only_self_death is OFF
+        // (the toggle's intent is "any combat event triggers a reply").
+        // GSI never emits PlayerDied for unspectated bots, so without
+        // this branch killing a bot would silently produce nothing.
+        {
+            let config = self.config.clone();
+            let corpus = self.corpus.clone();
+            let sender = self.sender.clone();
+            let cfg_manager = self.cfg_manager.clone();
+            let ui_tx = self.ui_tx.clone();
+
+            self.listener.on(move |e: &PlayerGotKill| {
+                let snapshot = config.read().clone();
+                if snapshot.only_self_death {
+                    // Strict mode: chat replies are gated by death-only.
                     return;
                 }
+
+                let killer = e.player.name.clone();
+                let _ = ui_tx.send(UiEvent::info(
+                    UiKind::PlayerDeath,
+                    format!("击杀 +1（{killer}）"),
+                ));
+
+                dispatch_chat_reply(
+                    &snapshot,
+                    &corpus,
+                    &cfg_manager,
+                    &sender,
+                    &ui_tx,
+                    DispatchTrigger::Kill,
+                );
+            });
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum DispatchTrigger {
+    Death,
+    Kill,
+}
+
+/// Pick a corpus line and route it through the configured delivery path
+/// (cfg-mode press → in-game `say`, or auto-typing into the chat box).
+/// Errors are forwarded to the UI so the user can see *why* a message
+/// didn't go out.
+fn dispatch_chat_reply(
+    snapshot: &AppConfig,
+    corpus: &ChatMessageManager,
+    cfg_manager: &CfgManager,
+    sender: &ChatMessageSender,
+    ui_tx: &broadcast::Sender<UiEvent>,
+    trigger: DispatchTrigger,
+) {
+    let Some(message) = corpus.random() else {
+        let _ = ui_tx.send(UiEvent::warn(
+            UiKind::ChatSent,
+            i18n::t("status.corpus_empty"),
+        ));
+        return;
+    };
+
+    if snapshot.use_cfg_mode {
+        let cm = cfg_manager.clone();
+        let in_team = cm.select_in_team_chat();
+        let ui_tx = ui_tx.clone();
+        let msg = message.clone();
+        tokio::task::spawn_blocking(move || match cm.dispatch(&msg, in_team) {
+            Ok(()) => {
+                let _ = ui_tx.send(UiEvent::info(
+                    UiKind::ChatSent,
+                    i18n::t_args("status.message_sent", [msg.as_str()].as_slice()),
+                ));
             }
-
-            let message = match corpus.random() {
-                Some(m) => m,
-                None => return,
-            };
-
-            if snapshot.use_cfg_mode {
-                let cm = cfg_manager.clone();
-                let in_team = cm.select_in_team_chat();
-                let ui_tx2 = ui_tx.clone();
-                let msg2 = message.clone();
-                tokio::task::spawn_blocking(move || match cm.dispatch(&msg2, in_team) {
-                    Ok(()) => {
-                        let _ = ui_tx2.send(UiEvent::info(
-                            UiKind::ChatSent,
-                            i18n::t_args("status.message_sent", [msg2.as_str()].as_slice()),
-                        ));
-                    }
-                    Err(err) => {
-                        let _ = ui_tx2.send(UiEvent::error(UiKind::Cfg, format!("{err}")));
-                    }
-                });
-            } else {
-                let sender = sender.clone();
-                let ui_tx2 = ui_tx.clone();
-                tokio::spawn(async move {
-                    match sender.send_message(&message).await {
-                        Ok(()) => {
-                            let _ = ui_tx2.send(UiEvent::info(
-                                UiKind::ChatSent,
-                                i18n::t_args("status.message_sent", [message.as_str()].as_slice()),
-                            ));
-                        }
-                        Err(err) => {
-                            let _ = ui_tx2.send(UiEvent::error(UiKind::ChatSent, format!("{err}")));
-                        }
-                    }
-                });
+            Err(err) => {
+                let label = match trigger {
+                    DispatchTrigger::Death => "死亡",
+                    DispatchTrigger::Kill => "击杀",
+                };
+                let _ = ui_tx.send(UiEvent::error(
+                    UiKind::Cfg,
+                    format!("{label}触发 cfg 派发失败: {err}"),
+                ));
+            }
+        });
+    } else {
+        let sender = sender.clone();
+        let ui_tx = ui_tx.clone();
+        tokio::spawn(async move {
+            match sender.send_message(&message).await {
+                Ok(()) => {
+                    let _ = ui_tx.send(UiEvent::info(
+                        UiKind::ChatSent,
+                        i18n::t_args("status.message_sent", [message.as_str()].as_slice()),
+                    ));
+                }
+                Err(err) => {
+                    let label = match trigger {
+                        DispatchTrigger::Death => "死亡",
+                        DispatchTrigger::Kill => "击杀",
+                    };
+                    let _ = ui_tx.send(UiEvent::error(
+                        UiKind::ChatSent,
+                        format!("{label}触发自动输入失败: {err}"),
+                    ));
+                }
             }
         });
     }

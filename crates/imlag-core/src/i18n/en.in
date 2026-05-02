@@ -71,6 +71,7 @@
     ("status.config_loaded", "Configuration loaded"),
     ("status.player_dead", "Watched player {0} died"),
     ("status.message_sent", "Sent message {0}"),
+    ("status.corpus_empty", "Trigger fired but the corpus is empty — add a phrase first."),
     ("status.message_added", "Added phrase {0}"),
     ("status.message_removed", "Removed phrase {0}"),
     ("status.corpus_imported", "Imported {0} phrases (skipped {1})"),

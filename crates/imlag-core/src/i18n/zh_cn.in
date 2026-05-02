@@ -72,6 +72,7 @@
     ("status.config_loaded", "设置已加载"),
     ("status.player_dead", "检测到玩家死亡 {0}"),
     ("status.message_sent", "已发送消息 {0}"),
+    ("status.corpus_empty", "触发了但语料为空，请先添加一句话。"),
     ("status.message_added", "已添加语料 {0}"),
     ("status.message_removed", "已删除语料 {0}"),
     ("status.corpus_imported", "已导入语料 {0} 条，跳过 {1} 条"),
