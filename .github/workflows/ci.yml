@@ -35,10 +35,10 @@ jobs:
           workspaces: imlag-rs
       - name: cargo build
         working-directory: imlag-rs
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
       - name: cargo test
         working-directory: imlag-rs
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   lints:
     name: rustfmt + clippy
@@ -65,4 +65,4 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         working-directory: imlag-rs
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
