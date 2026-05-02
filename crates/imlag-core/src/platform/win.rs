@@ -23,7 +23,6 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
-use windows::core::PWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, BOOL, HANDLE, HMODULE, HWND, LPARAM, WPARAM,
 };
@@ -45,12 +44,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// event lands.
 const MIN_KEY_INTERVAL: Duration = Duration::from_millis(20);
 
-fn at_least(d: Duration) -> Duration {
-    if d < MIN_KEY_INTERVAL {
-        MIN_KEY_INTERVAL
-    } else {
-        d
-    }
+/// Standard error returned when no CS2 window can be located.
+fn cs2_not_found() -> io::Error {
+    io::Error::other("CS2 main window not found")
 }
 
 const VK_RETURN: u8 = 0x0D;
@@ -169,6 +165,25 @@ struct EnumState {
     found: Option<HWND>,
 }
 
+/// Returns `true` if `pid` is a `cs2.exe` process.
+fn is_cs2_pid(pid: u32) -> bool {
+    process_image_name(pid)
+        .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(str::to_owned))
+        .map(|s| s.eq_ignore_ascii_case("cs2.exe"))
+        .unwrap_or(false)
+}
+
+/// Returns the pid that owns `hwnd`, or `None` if the call fails.
+fn hwnd_pid(hwnd: HWND) -> Option<u32> {
+    let mut pid: u32 = 0;
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if tid == 0 || pid == 0 {
+        None
+    } else {
+        Some(pid)
+    }
+}
+
 unsafe extern "system" fn enum_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
     let state = unsafe { &mut *(lp.0 as *mut EnumState) };
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
@@ -179,21 +194,9 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
     if unsafe { GetWindowTextLengthW(hwnd) } == 0 {
         return BOOL(1);
     }
-    let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == 0 {
-        return BOOL(1);
-    }
-    if let Some(p) = process_image_name(pid) {
-        let is_cs2 = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.eq_ignore_ascii_case("cs2.exe"))
-            .unwrap_or(false);
-        if is_cs2 {
-            state.found = Some(hwnd);
-            return BOOL(0); // stop enumeration
-        }
+    if hwnd_pid(hwnd).map(is_cs2_pid).unwrap_or(false) {
+        state.found = Some(hwnd);
+        return BOOL(0); // stop enumeration
     }
     BOOL(1)
 }
@@ -205,21 +208,8 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
 pub fn find_cs2_window() -> Option<Cs2Window> {
     // Fast path: foreground.
     let fg = unsafe { GetForegroundWindow() };
-    if !fg.0.is_null() {
-        let mut pid: u32 = 0;
-        unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
-        if pid != 0 {
-            if let Some(p) = process_image_name(pid) {
-                let is_cs2 = p
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case("cs2.exe"))
-                    .unwrap_or(false);
-                if is_cs2 {
-                    return Some(Cs2Window(fg.0 as isize));
-                }
-            }
-        }
+    if !fg.0.is_null() && hwnd_pid(fg).map(is_cs2_pid).unwrap_or(false) {
+        return Some(Cs2Window(fg.0 as isize));
     }
 
     // Fallback: enumerate top-level windows.
@@ -251,7 +241,7 @@ fn post_key_event(target: Cs2Window, vk: u8, up: bool) -> io::Result<()> {
 /// state).
 pub fn post_key_tap(target: Cs2Window, vk: u8, hold: Duration) -> io::Result<()> {
     post_key_event(target, vk, false)?;
-    sleep(at_least(hold));
+    sleep(hold.max(MIN_KEY_INTERVAL));
     post_key_event(target, vk, true)
 }
 
@@ -282,38 +272,16 @@ pub fn post_enter(target: Cs2Window) -> io::Result<()> {
     post_key_tap(target, VK_RETURN, MIN_KEY_INTERVAL)
 }
 
-/// Convenience: tap a single ASCII char.
-pub fn press_key(ch: char, delay: Duration) -> io::Result<()> {
-    let target = find_cs2_window().ok_or_else(|| io::Error::other("CS2 main window not found"))?;
-    post_key_tap(target, char_to_vk(ch), delay)
-}
-
 /// Tap a key by spec (`"ins"`, `"y"`, `"f5"`, …). Returns `Ok(false)`
-/// if the spec is unknown.
+/// if the spec is unknown. Used by cfg-mode dispatch which doesn't
+/// hold a `Cs2Window` — looks one up itself per call.
 pub fn press_key_spec(spec: &str, delay: Duration) -> io::Result<bool> {
     let Some(vk) = spec_to_vk(spec) else {
         return Ok(false);
     };
-    let target = find_cs2_window().ok_or_else(|| io::Error::other("CS2 main window not found"))?;
+    let target = find_cs2_window().ok_or_else(cs2_not_found)?;
     post_key_tap(target, vk, delay)?;
     Ok(true)
-}
-
-/// Tap Enter once.
-pub fn press_enter() -> io::Result<()> {
-    press_key('\r', MIN_KEY_INTERVAL)
-}
-
-/// Type `text` into CS2's chat box, character by character. The chat
-/// box must already be open (the caller has tapped the chat key first).
-/// `per_char` controls the spacing between WM_CHAR posts.
-pub fn type_text(text: &str, per_char: Duration) -> io::Result<()> {
-    let target = find_cs2_window().ok_or_else(|| io::Error::other("CS2 main window not found"))?;
-    for c in text.chars() {
-        post_char(target, c)?;
-        sleep(at_least(per_char));
-    }
-    Ok(())
 }
 
 /// Milliseconds since the user's last keyboard or mouse input. Used
@@ -334,27 +302,15 @@ pub fn idle_millis() -> u32 {
 }
 
 /// Returns `true` when the foreground window belongs to the `cs2.exe`
-/// process. With PostMessage we don't actually require this for the
-/// dispatch to succeed, but it's still a useful hint for the user
+/// process. With PostMessage we don't *require* this for the dispatch
+/// to succeed, but it's still a useful hint for the user
 /// ("did you alt-tab away?").
 pub fn is_cs2_active() -> bool {
     let hwnd: HWND = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return false;
     }
-    let mut pid: u32 = 0;
-    let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if tid == 0 {
-        return false;
-    }
-    process_image_name(pid)
-        .map(|p| {
-            p.file_name()
-                .and_then(|s| s.to_str())
-                .map(|s| s.eq_ignore_ascii_case("cs2.exe"))
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
+    hwnd_pid(hwnd).map(is_cs2_pid).unwrap_or(false)
 }
 
 fn process_image_name(pid: u32) -> Option<PathBuf> {
@@ -370,8 +326,3 @@ fn process_image_name(pid: u32) -> Option<PathBuf> {
     buf.truncate(len as usize);
     Some(PathBuf::from(String::from_utf16_lossy(&buf)))
 }
-
-// Suppress unused-imports warning from PWSTR if the Windows API
-// surface changes.
-#[allow(dead_code)]
-fn _force_link(_: PWSTR) {}

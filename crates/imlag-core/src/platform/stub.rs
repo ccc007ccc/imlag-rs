@@ -15,12 +15,6 @@ pub fn find_cs2_window() -> Option<Cs2Window> {
 }
 
 /// Stub.
-pub fn press_key(_ch: char, _delay: Duration) -> io::Result<()> {
-    tracing::warn!("press_key is a no-op on this platform");
-    Ok(())
-}
-
-/// Stub.
 pub fn press_key_spec(_spec: &str, _delay: Duration) -> io::Result<bool> {
     tracing::warn!("press_key_spec is a no-op on this platform");
     Ok(false)
@@ -43,11 +37,6 @@ pub fn post_char(_target: Cs2Window, _c: char) -> io::Result<()> {
 
 /// Stub.
 pub fn post_enter(_target: Cs2Window) -> io::Result<()> {
-    Ok(())
-}
-
-/// Stub.
-pub fn press_enter() -> io::Result<()> {
     Ok(())
 }
 

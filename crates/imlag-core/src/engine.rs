@@ -139,7 +139,7 @@ impl Engine {
     /// to an OS-assigned ephemeral port. The cfg is written *after* the
     /// listener is bound, with the actually-bound port baked in — so
     /// CS2 always points at the right place even if a security tool /
-    /// driver is squatting on 47474.
+    /// driver is squatting on [`DEFAULT_PORT`].
     pub async fn start_gsi(&self) -> anyhow::Result<()> {
         self.attach_handlers();
 
@@ -261,7 +261,7 @@ impl Engine {
                 let killer = e.player.name.clone();
                 let _ = ui_tx.send(UiEvent::info(
                     UiKind::PlayerDeath,
-                    format!("击杀 +1（{killer}）"),
+                    i18n::t_args("status.player_kill", [killer.as_str()].as_slice()),
                 ));
 
                 dispatch_chat_reply(
@@ -281,6 +281,17 @@ impl Engine {
 enum DispatchTrigger {
     Death,
     Kill,
+}
+
+impl DispatchTrigger {
+    /// i18n key for the human-readable label of this trigger
+    /// (`"死亡"` / `"擊殺"` / `"death"` / …).
+    fn label_key(self) -> &'static str {
+        match self {
+            DispatchTrigger::Death => "trigger.death",
+            DispatchTrigger::Kill => "trigger.kill",
+        }
+    }
 }
 
 /// Pick a corpus line and route it through the configured delivery path
@@ -316,13 +327,13 @@ fn dispatch_chat_reply(
                 ));
             }
             Err(err) => {
-                let label = match trigger {
-                    DispatchTrigger::Death => "死亡",
-                    DispatchTrigger::Kill => "击杀",
-                };
+                let label = i18n::t(trigger.label_key());
                 let _ = ui_tx.send(UiEvent::error(
                     UiKind::Cfg,
-                    format!("{label}触发 cfg 派发失败: {err}"),
+                    i18n::t_args(
+                        "dispatch.cfg_failed",
+                        [label.as_str(), err.to_string().as_str()].as_slice(),
+                    ),
                 ));
             }
         });
@@ -338,13 +349,13 @@ fn dispatch_chat_reply(
                     ));
                 }
                 Err(err) => {
-                    let label = match trigger {
-                        DispatchTrigger::Death => "死亡",
-                        DispatchTrigger::Kill => "击杀",
-                    };
+                    let label = i18n::t(trigger.label_key());
                     let _ = ui_tx.send(UiEvent::error(
                         UiKind::ChatSent,
-                        format!("{label}触发自动输入失败: {err}"),
+                        i18n::t_args(
+                            "dispatch.chat_failed",
+                            [label.as_str(), err.to_string().as_str()].as_slice(),
+                        ),
                     ));
                 }
             }
