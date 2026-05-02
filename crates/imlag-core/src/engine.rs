@@ -17,8 +17,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// Default port the listener binds to (matches the original Godot project).
-pub const DEFAULT_PORT: u16 = 4000;
+/// Default port the listener binds to.
+///
+/// Picked to dodge the usual suspects: 3000/4000/8000/8080 are dev-server
+/// territory and collide constantly; 49152+ is the OS's ephemeral range
+/// (a long-lived listener there can race against outbound source-port
+/// allocation). 47474 sits in the IANA registered range, isn't assigned
+/// to anything, and isn't used by other GSI tooling — so a fresh CS2
+/// install with no other tools running should bind cleanly.
+pub const DEFAULT_PORT: u16 = 47474;
 
 /// Internal name used for the auto-generated GSI cfg file.
 pub const GSI_SERVICE_NAME: &str = "ImLag";
