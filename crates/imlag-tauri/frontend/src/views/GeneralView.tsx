@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Card, Input, ListItem, Toggle } from "@/components";
+import { Button, Card, Input, ListItem, ModeOption, Toggle } from "@/components";
 import { useEngine } from "@/lib/engine";
 import { useT } from "@/lib/i18n";
 import { api } from "@/lib/api";
@@ -68,6 +68,23 @@ export function GeneralView() {
               {gsiRunning ? t("general.stop_gsi") : t("general.start_gsi")}
             </Button>
           </div>
+        </div>
+      </Card>
+
+      <Card title={t("general.input_mode")} hint={t("general.input_mode_hint")}>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <ModeOption
+            selected={config.useCfgMode}
+            label={t("mode.cfg")}
+            description={t("mode.cfg_description")}
+            onSelect={() => patchConfig("useCfgMode", true)}
+          />
+          <ModeOption
+            selected={!config.useCfgMode}
+            label={t("mode.chat")}
+            description={t("mode.chat_description")}
+            onSelect={() => patchConfig("useCfgMode", false)}
+          />
         </div>
       </Card>
 

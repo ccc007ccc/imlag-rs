@@ -10,6 +10,17 @@ pub fn press_key(_ch: char, _delay: Duration) {
 }
 
 /// Stub.
+pub fn press_key_spec(_spec: &str, _delay: Duration) -> bool {
+    tracing::warn!("press_key_spec is a no-op on this platform");
+    false
+}
+
+/// Stub.
+pub fn spec_to_vk(_spec: &str) -> Option<u8> {
+    None
+}
+
+/// Stub.
 pub fn key_down(_ch: char) {}
 
 /// Stub.

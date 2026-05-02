@@ -1,11 +1,29 @@
 import { useState } from "react";
-import { Button, Card, Input, ModeOption } from "@/components";
+import { Button, Card, Input, ModeOption, Notice } from "@/components";
 import { useEngine } from "@/lib/engine";
 import { useT } from "@/lib/i18n";
 import { api } from "@/lib/api";
 import type { CfgChatMode } from "@/lib/types";
 
 const MODE_ORDER: CfgChatMode[] = ["global", "team", "random"];
+
+const NAMED_KEYS = new Set([
+  "ins", "insert", "home", "end", "del", "delete",
+  "pgup", "pageup", "pgdn", "pgdown", "pagedown",
+  "up", "down", "left", "right",
+  "space", "tab", "enter", "return", "backspace", "bksp", "esc", "escape",
+]);
+
+function isValidTriggerSpec(raw: string): boolean {
+  const s = raw.trim().toLowerCase();
+  if (s.length === 1) return /^[a-z0-9]$/.test(s);
+  if (NAMED_KEYS.has(s)) return true;
+  // f1..f24
+  const m = /^f(\d{1,2})$/.exec(s);
+  if (!m) return false;
+  const n = parseInt(m[1], 10);
+  return n >= 1 && n <= 24;
+}
 
 export function CfgModeView() {
   const { config, patchConfig } = useEngine();
@@ -30,7 +48,7 @@ export function CfgModeView() {
 
   const applyTriggerKey = async () => {
     const v = trigger.trim().toLowerCase();
-    if (!v || !/^[a-z0-9]$/.test(v)) return;
+    if (!isValidTriggerSpec(v)) return;
     await patchConfig("triggerKey", v);
     setKeyDraft(null);
   };
@@ -60,6 +78,10 @@ export function CfgModeView() {
         <p className="text-[12px] text-fg-tertiary">{t("cfg.hint")}</p>
       </header>
 
+      {!config.useCfgMode && (
+        <Notice tone="warning">{t("cfg.inactive_notice")}</Notice>
+      )}
+
       <Card title={t("cfg.cs2_path")}>
         <div className="flex flex-wrap items-center gap-2">
           <Input
@@ -84,7 +106,7 @@ export function CfgModeView() {
         <div className="flex flex-wrap items-center gap-2">
           <Input
             value={trigger}
-            maxLength={1}
+            maxLength={10}
             onChange={(e) => setKeyDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -92,8 +114,8 @@ export function CfgModeView() {
                 applyTriggerKey();
               }
             }}
-            className="w-20! text-center font-mono"
-            placeholder="k"
+            className="w-28! text-center font-mono"
+            placeholder="ins"
           />
           <Button variant="accent" size="sm" onClick={applyTriggerKey}>
             {t("cfg.apply_key")}

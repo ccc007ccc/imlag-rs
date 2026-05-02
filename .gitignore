@@ -3,6 +3,7 @@
 .DS_Store
 .idea/
 .vscode/
+.claude/
 *.iml
 # 前端构建产物与缓存
 **/node_modules/

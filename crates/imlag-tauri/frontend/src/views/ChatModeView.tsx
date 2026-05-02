@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Card, Input, ModeOption, Toggle } from "@/components";
+import { Button, Card, Input, Notice, Toggle } from "@/components";
 import { useEngine } from "@/lib/engine";
 import { useT } from "@/lib/i18n";
 
@@ -37,6 +37,10 @@ export function ChatModeView() {
         </h2>
         <p className="text-[12px] text-fg-tertiary">{t("chat.hint")}</p>
       </header>
+
+      {config.useCfgMode && (
+        <Notice tone="warning">{t("chat.inactive_notice")}</Notice>
+      )}
 
       <Card>
         <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
@@ -87,23 +91,6 @@ export function ChatModeView() {
             checked={config.forceMode}
             onChange={(v) => patchConfig("forceMode", v)}
             label={t("chat.force_mode")}
-          />
-        </div>
-      </Card>
-
-      <Card title={t("section.chat")}>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <ModeOption
-            selected={config.useCfgMode}
-            label={t("mode.cfg")}
-            description={t("mode.cfg_description")}
-            onSelect={() => patchConfig("useCfgMode", true)}
-          />
-          <ModeOption
-            selected={!config.useCfgMode}
-            label={t("mode.chat")}
-            description={t("mode.chat_description")}
-            onSelect={() => patchConfig("useCfgMode", false)}
           />
         </div>
       </Card>

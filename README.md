@@ -32,12 +32,12 @@ The GSI parser is split into its own open-source crate:
   array), de-duplicated automatically.
 - **Two trigger modes**
   - **CFG mode** — patches `autoexec.cfg` once with a single
-    `bind "<trigger>" "exec imlag_say"`. The dispatch cfg is **empty between
-    deaths**, so accidentally pressing the trigger key in-game is a no-op
-    (no preset leaks). On every death ImLag rewrites the cfg with one
-    `say "..."` / `say_team "..."` line, taps the trigger, waits ~300 ms,
-    then clears the cfg again. Channel selection is `global` / `team` /
-    `random`.
+    `bind "<trigger>" "exec imlag_say"` (default: `INS`). The dispatch cfg
+    is **empty between deaths**, so accidentally pressing the trigger key
+    in-game is a no-op (no preset leaks). On every death ImLag rewrites
+    the cfg with one `say "..."` / `say_team "..."` line, taps the
+    trigger, waits ~300 ms, then clears the cfg again. Channel selection
+    is `global` / `team` / `random`.
   - **Chat mode** — releases every held key first (so movement / lean /
     crouch don't bleed in), opens the chat box, pastes the message, hits
     Enter, via simulated keystrokes.
@@ -155,7 +155,7 @@ thanks to serde aliases):
 {
   "playerNames": ["YourInGameName"],
   "onlySelfDeath": true,
-  "triggerKey": "k",
+  "triggerKey": "ins",
   "cfgChatMode": "global",
   "cs2Path": "",
   "useCfgMode": true,
@@ -172,7 +172,7 @@ thanks to serde aliases):
 |---|---|
 | `playerNames` | Names whose deaths trigger a chat reply (compared against GSI `player.name`) |
 | `onlySelfDeath` | Only fire when one of `playerNames` is the dying player |
-| `triggerKey` | Single key bound to `exec imlag_say` in CFG mode |
+| `triggerKey` | Single key bound to `exec imlag_say` in CFG mode. Single letter/digit (`k`, `7`) or a named key (`ins`, `home`, `end`, `pgup`, `pgdn`, `del`, `f1`–`f24`). Default: `ins`. |
 | `cfgChatMode` | CFG dispatch channel: `"global"` / `"team"` / `"random"` |
 | `useCfgMode` | `true` = CFG mode (cfg slot rewrite + trigger key); `false` = simulate keys directly |
 | `chatKey` | Chat-mode opener (`y` for global, `u` for team) |

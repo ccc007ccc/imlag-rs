@@ -8,6 +8,8 @@ export type { InputProps } from "./Input";
 export { ListItem } from "./ListItem";
 export { ModeOption } from "./ModeOption";
 export type { ModeOptionProps } from "./ModeOption";
+export { Notice } from "./Notice";
+export type { NoticeProps, NoticeTone } from "./Notice";
 export { Pill, StatusDot } from "./Pill";
 export { Tabs } from "./Tabs";
 export { Toggle } from "./Toggle";

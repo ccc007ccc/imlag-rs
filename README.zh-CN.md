@@ -23,10 +23,11 @@ ImLag 监听 Counter-Strike 2 的 [Game State Integration][gsi]，在你死亡�
 - **语料管理** — 文件 / URL 导入（纯文本或 JSON 数组），自动去重。
 - **两种触发模式**
   - **CFG 模式**：`autoexec.cfg` 中只写入一条
-    `bind "<触发键>" "exec imlag_say"`。派发用的 `imlag_say.cfg` 平时为空，
-    **玩家在游戏里误触触发键不会发出任何消息**。检测到死亡时 ImLag 才往
-    cfg 写入一行 `say "..."` / `say_team "..."`，按一下触发键让 CS2 执行，
-    约 300 ms 后再把 cfg 清空。消息通道支持 `优先全局 / 优先队内 / 随机` 三选一。
+    `bind "<触发键>" "exec imlag_say"`（默认 `INS`）。派发用的
+    `imlag_say.cfg` 平时为空，**玩家在游戏里误触触发键不会发出任何消息**。
+    检测到死亡时 ImLag 才往 cfg 写入一行 `say "..."` / `say_team "..."`，
+    按一下触发键让 CS2 执行，约 300 ms 后再把 cfg 清空。消息通道支持
+    `优先全局 / 优先队内 / 随机` 三选一。
   - **聊天模式**：先松开当前所有按下的键（避免 W / Shift / Ctrl 等被
     带进聊天框），再模拟打开聊天框、粘贴消息、按下回车。
 - **安全的 cfg 改动** — 修改 `autoexec.cfg` 前先备份，一键还原会清除所有 ImLag 留下的内容。
@@ -134,7 +135,7 @@ imlag-rs/
 {
   "playerNames": ["你的游戏名"],
   "onlySelfDeath": true,
-  "triggerKey": "k",
+  "triggerKey": "ins",
   "cfgChatMode": "global",
   "cs2Path": "",
   "useCfgMode": true,
@@ -151,7 +152,7 @@ imlag-rs/
 |---|---|
 | `playerNames` | 触发自动消息的玩家名（与 GSI `player.name` 比对） |
 | `onlySelfDeath` | 仅当 `playerNames` 中的玩家死亡时触发 |
-| `triggerKey` | CFG 模式下绑定到 `exec imlag_say` 的单个按键 |
+| `triggerKey` | CFG 模式下绑定到 `exec imlag_say` 的单键。支持单个字母/数字（`k`、`7`）或命名键（`ins`、`home`、`end`、`pgup`、`pgdn`、`del`、`f1`–`f24`）。默认 `ins`。 |
 | `cfgChatMode` | CFG 派发通道：`"global"` / `"team"` / `"random"` |
 | `useCfgMode` | `true` = CFG 模式（写 cfg 派发槽 + 按触发键）；`false` = 模拟键盘直接打字 |
 | `chatKey` | 聊天模式下打开聊天框的键（`y` 全局 / `u` 队内） |

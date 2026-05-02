@@ -125,7 +125,7 @@ fn default_true() -> bool {
     true
 }
 fn default_trigger_key() -> String {
-    "k".into()
+    "ins".into()
 }
 fn default_chat_key() -> String {
     "y".into()
@@ -219,15 +219,57 @@ impl AppConfig {
             self.key_delay = default_key_delay();
         }
         self.language = normalize_language(&self.language);
-        // Constrain trigger_key to a single ASCII alphanumeric character.
+        // Validate the trigger key. Accepts single ASCII alphanumeric
+        // characters and a small named-key set (ins/home/f5/…). Anything
+        // else falls back to the default ("ins").
         let raw = self.trigger_key.trim().to_ascii_lowercase();
-        let valid = raw
-            .chars()
-            .next()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .map(|c| c.to_string());
-        self.trigger_key = valid.unwrap_or_else(default_trigger_key);
+        self.trigger_key = if is_valid_trigger_spec(&raw) {
+            raw
+        } else {
+            default_trigger_key()
+        };
     }
+}
+
+/// Whitelist of valid trigger-key specs accepted by [`AppConfig::normalize`].
+///
+/// Mirrors the lookup table in `platform::win::spec_to_vk`. Kept here so
+/// the config layer can reject garbage input without depending on the
+/// platform module (which is a no-op outside Windows).
+fn is_valid_trigger_spec(spec: &str) -> bool {
+    if spec.chars().count() == 1 {
+        return spec.chars().next().unwrap().is_ascii_alphanumeric();
+    }
+    matches!(
+        spec,
+        "ins"
+            | "insert"
+            | "home"
+            | "end"
+            | "del"
+            | "delete"
+            | "pgup"
+            | "pageup"
+            | "pgdn"
+            | "pgdown"
+            | "pagedown"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "space"
+            | "tab"
+            | "enter"
+            | "return"
+            | "backspace"
+            | "bksp"
+            | "esc"
+            | "escape"
+    ) || (spec.starts_with('f')
+        && spec[1..]
+            .parse::<u8>()
+            .map(|n| (1..=24).contains(&n))
+            .unwrap_or(false))
 }
 
 /// Normalise an arbitrary language tag down to the three we support.
@@ -248,7 +290,7 @@ mod tests {
         let cfg = AppConfig::default();
         let s = serde_json::to_string(&cfg).unwrap();
         let parsed: AppConfig = serde_json::from_str(&s).unwrap();
-        assert_eq!(parsed.trigger_key, "k");
+        assert_eq!(parsed.trigger_key, "ins");
         assert_eq!(parsed.cfg_chat_mode, CfgChatMode::Global);
         assert!(parsed.only_self_death);
         assert_eq!(parsed.key_delay, 100);
@@ -308,7 +350,29 @@ mod tests {
             ..Default::default()
         };
         cfg.normalize();
-        assert_eq!(cfg.trigger_key, "k");
+        assert_eq!(cfg.trigger_key, "ins");
+    }
+
+    #[test]
+    fn normalize_accepts_named_keys() {
+        for spec in ["INS", "Home", "f5", "PgUp", "f24"] {
+            let mut cfg = AppConfig {
+                trigger_key: spec.into(),
+                ..Default::default()
+            };
+            cfg.normalize();
+            assert_eq!(cfg.trigger_key, spec.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn normalize_rejects_invalid_function_keys() {
+        let mut cfg = AppConfig {
+            trigger_key: "f25".into(),
+            ..Default::default()
+        };
+        cfg.normalize();
+        assert_eq!(cfg.trigger_key, "ins");
     }
 
     #[test]

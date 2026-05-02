@@ -44,6 +44,57 @@ fn char_to_vk(ch: char) -> u8 {
     }
 }
 
+/// Resolve a CS2-style key spec to a Windows virtual-key code.
+///
+/// Accepts:
+///  - Single ASCII characters (`"a"`, `"k"`, `"7"`) → routed through
+///    `char_to_vk`.
+///  - Named keys, case-insensitive: `ins`, `home`, `end`, `del`, `pgup`,
+///    `pgdn`, `up`, `down`, `left`, `right`, `space`, `tab`, `enter`,
+///    `backspace`, `f1`..`f24`.
+///
+/// Returns `None` for unknown specs so callers can fall back gracefully.
+pub fn spec_to_vk(spec: &str) -> Option<u8> {
+    let s = spec.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.chars().count() == 1 {
+        let ch = s.chars().next().unwrap();
+        if ch.is_ascii_alphanumeric() {
+            return Some(char_to_vk(ch));
+        }
+    }
+    let lower = s.to_ascii_lowercase();
+    let vk: u8 = match lower.as_str() {
+        "ins" | "insert" => 0x2D,
+        "home" => 0x24,
+        "end" => 0x23,
+        "del" | "delete" => 0x2E,
+        "pgup" | "pageup" => 0x21,
+        "pgdn" | "pgdown" | "pagedown" => 0x22,
+        "up" => 0x26,
+        "down" => 0x28,
+        "left" => 0x25,
+        "right" => 0x27,
+        "space" => 0x20,
+        "tab" => 0x09,
+        "enter" | "return" => 0x0D,
+        "backspace" | "bksp" => 0x08,
+        "esc" | "escape" => 0x1B,
+        s if s.starts_with('f') => {
+            let n: u8 = s[1..].parse().ok()?;
+            if (1..=24).contains(&n) {
+                0x70 + (n - 1)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(vk)
+}
+
 fn key_event(vk: u8, up: bool) {
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u8;
     let flags = if up {
@@ -64,6 +115,20 @@ pub fn press_key(ch: char, delay: Duration) {
     sleep(delay);
     key_event(vk, true);
     sleep(delay);
+}
+
+/// Like [`press_key`] but accepts a [CS2-style key spec][spec_to_vk]
+/// (`"k"`, `"ins"`, `"f5"`, …). Returns `false` if the spec is unknown
+/// and no key was pressed.
+pub fn press_key_spec(spec: &str, delay: Duration) -> bool {
+    let Some(vk) = spec_to_vk(spec) else {
+        return false;
+    };
+    key_event(vk, false);
+    sleep(delay);
+    key_event(vk, true);
+    sleep(delay);
+    true
 }
 
 /// Hold a key down without releasing.

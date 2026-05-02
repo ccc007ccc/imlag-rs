@@ -193,12 +193,11 @@ impl CfgManager {
         let cfg_path = cfg_dir.join(SAY_CFG_FILE);
 
         let snapshot = self.config.read().clone();
-        let trigger_char = snapshot
-            .trigger_key
-            .chars()
-            .next()
-            .unwrap_or('k')
-            .to_ascii_lowercase();
+        let trigger_spec = if snapshot.trigger_key.trim().is_empty() {
+            "ins".to_string()
+        } else {
+            snapshot.trigger_key.clone()
+        };
 
         write_dispatch_line(&cfg_path, message, in_team_chat)?;
 
@@ -207,7 +206,9 @@ impl CfgManager {
         crate::platform::release_all_keys();
         sleep(Duration::from_millis(40));
 
-        crate::platform::press_key(trigger_char, Duration::from_millis(60));
+        if !crate::platform::press_key_spec(&trigger_spec, Duration::from_millis(60)) {
+            tracing::warn!("trigger key spec '{trigger_spec}' is not recognised");
+        }
 
         // Give CS2 a beat to finish exec'ing the file before we wipe it.
         sleep(DISPATCH_CLEAR_DELAY);
@@ -309,7 +310,7 @@ fn remove_imlag_section(lines: &mut Vec<String>) {
 }
 
 fn add_imlag_section(lines: &mut Vec<String>, cfg: &AppConfig) {
-    let trigger = cfg.trigger_key.chars().next().unwrap_or('k');
+    let trigger = format_bind_token(&cfg.trigger_key);
     lines.push(String::new());
     lines.push(COMMENT_START.into());
     lines.push("// This block is automatically managed by ImLag.".into());
@@ -323,6 +324,23 @@ fn add_imlag_section(lines: &mut Vec<String>, cfg: &AppConfig) {
     lines.push(String::new());
     lines.retain(|l| !l.trim().eq_ignore_ascii_case("host_writeconfig"));
     lines.push("host_writeconfig".into());
+}
+
+/// Convert a key spec like `"k"` / `"ins"` / `"f5"` into the token CS2's
+/// `bind` command expects. Single ASCII letters/digits stay lower-case;
+/// named keys (Insert, Home, F-row, …) become upper-case.
+fn format_bind_token(spec: &str) -> String {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return "INS".into();
+    }
+    if trimmed.chars().count() == 1 {
+        let ch = trimmed.chars().next().unwrap();
+        if ch.is_ascii_alphanumeric() {
+            return ch.to_ascii_lowercase().to_string();
+        }
+    }
+    trimmed.to_ascii_uppercase()
 }
 
 #[cfg(test)]
@@ -348,6 +366,29 @@ mod tests {
         remove_imlag_section(&mut lines);
         assert!(!lines.iter().any(|l| l.contains("imlag_say")));
         assert!(lines.iter().any(|l| l == "echo legacy"));
+    }
+
+    #[test]
+    fn imlag_section_uppercases_named_keys_for_bind() {
+        let cfg = AppConfig {
+            trigger_key: "ins".into(),
+            ..AppConfig::default()
+        };
+        let mut lines = Vec::new();
+        add_imlag_section(&mut lines, &cfg);
+        // CS2's bind expects named keys upper-cased.
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("bind \"INS\" \"exec imlag_say\"")));
+    }
+
+    #[test]
+    fn format_bind_token_handles_letters_and_named_keys() {
+        assert_eq!(format_bind_token("k"), "k");
+        assert_eq!(format_bind_token("K"), "k");
+        assert_eq!(format_bind_token("ins"), "INS");
+        assert_eq!(format_bind_token("F5"), "F5");
+        assert_eq!(format_bind_token(""), "INS");
     }
 
     #[test]
