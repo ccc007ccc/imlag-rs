@@ -13,3 +13,5 @@
 Config.json
 Messages.txt
 *.log
+# 本地 release notes 草稿（实际 release 内容由 GitHub Releases 托管）
+RELEASE_NOTES_*.md
