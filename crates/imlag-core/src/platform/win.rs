@@ -1,6 +1,14 @@
 //! Windows implementations of keyboard automation and foreground-window
-//! detection. Direct Win32 calls via the `windows` crate — no `user32!{}`
-//! manual extern blocks.
+//! detection. Direct Win32 calls via the `windows` crate.
+//!
+//! Keystroke injection goes through `SendInput` with **scan codes**
+//! (`KEYEVENTF_SCANCODE`). CS2 / Source 2 uses SDL2, which on Windows
+//! reads raw input. The legacy `keybd_event` API is documented as
+//! superseded — and in practice CS2 frequently drops keystrokes injected
+//! that way, *and* doesn't cleanly observe modifier-up events, leaving
+//! the in-game state stuck (Ctrl held, chat key fizzles, etc.). Switching
+//! to `SendInput` + scan codes makes the injection observable to SDL's
+//! raw-input path and atomic per call.
 
 #![allow(unsafe_code)]
 
@@ -14,10 +22,10 @@ use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, GetKeyboardState, MapVirtualKeyW, VkKeyScanW, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    GetKeyboardState, GetLastInputInfo, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0,
+    INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    KEYEVENTF_SCANCODE, LASTINPUTINFO, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 /// CS2's chat box has a small grace period between gaining focus and
@@ -111,15 +119,110 @@ pub fn spec_to_vk(spec: &str) -> Option<u8> {
     Some(vk)
 }
 
-fn key_event(vk: u8, up: bool) {
-    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u8;
-    let flags = if up {
-        KEYEVENTF_KEYUP
-    } else {
-        KEYBD_EVENT_FLAGS(0)
+/// VKs that need the `KEYEVENTF_EXTENDEDKEY` flag — the navigation
+/// cluster, arrows, and the right-side modifier keys. Without this flag
+/// CS2 occasionally interprets Insert as Numpad-0, etc.
+fn is_extended_vk(vk: u8) -> bool {
+    matches!(
+        vk,
+        0x21 // PgUp
+        | 0x22 // PgDn
+        | 0x23 // End
+        | 0x24 // Home
+        | 0x25 // Left
+        | 0x26 // Up
+        | 0x27 // Right
+        | 0x28 // Down
+        | 0x2D // Insert
+        | 0x2E // Delete
+        | 0x6F // Numpad Divide
+        | 0x90 // NumLock
+        | 0xA3 // Right Ctrl
+        | 0xA5 // Right Alt
+    )
+}
+
+/// Send one key event (down or up) via `SendInput`, using a scan code
+/// so CS2's raw-input pipeline picks it up reliably.
+fn send_key(vk: u8, up: bool) {
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+    let mut flags = KEYEVENTF_SCANCODE;
+    if is_extended_vk(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                // wVk MUST be 0 when KEYEVENTF_SCANCODE is set — Windows
+                // ignores it and resolves from wScan instead.
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     };
-    unsafe {
-        keybd_event(vk, scan, flags, 0);
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent == 0 {
+        let err = unsafe { GetLastError() };
+        tracing::warn!("SendInput dropped key vk=0x{vk:02X} up={up}: {err:?}");
+    }
+}
+
+/// Send press + release for a single VK as one `SendInput` batch — the
+/// OS delivers them atomically to whoever is listening.
+fn send_key_tap(vk: u8, hold: Duration) {
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+    let mut flags_down = KEYEVENTF_SCANCODE;
+    let mut flags_up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    if is_extended_vk(vk) {
+        flags_down |= KEYEVENTF_EXTENDEDKEY;
+        flags_up |= KEYEVENTF_EXTENDEDKEY;
+    }
+    let down = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: flags_down,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: flags_up,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    // Send down first, sleep for the hold time, then send up. CS2 wants
+    // a non-zero hold so its key-repeat / chat-input state machine sees
+    // a real keystroke, not a glitch.
+    let n = unsafe { SendInput(&[down], std::mem::size_of::<INPUT>() as i32) };
+    if n == 0 {
+        tracing::warn!("SendInput dropped down vk=0x{vk:02X}: {:?}", unsafe {
+            GetLastError()
+        });
+    }
+    sleep(at_least(hold));
+    let n = unsafe { SendInput(&[up], std::mem::size_of::<INPUT>() as i32) };
+    if n == 0 {
+        tracing::warn!("SendInput dropped up vk=0x{vk:02X}: {:?}", unsafe {
+            GetLastError()
+        });
     }
 }
 
@@ -127,12 +230,9 @@ fn key_event(vk: u8, up: bool) {
 /// hold time and the rest before returning. Both are clamped up to
 /// [`MIN_KEY_INTERVAL`] so CS2 always sees the keystroke.
 pub fn press_key(ch: char, delay: Duration) {
-    let delay = at_least(delay);
     let vk = char_to_vk(ch);
-    key_event(vk, false);
-    sleep(delay);
-    key_event(vk, true);
-    sleep(delay);
+    send_key_tap(vk, delay);
+    sleep(at_least(delay));
 }
 
 /// Like [`press_key`] but accepts a [CS2-style key spec][spec_to_vk]
@@ -142,22 +242,19 @@ pub fn press_key_spec(spec: &str, delay: Duration) -> bool {
     let Some(vk) = spec_to_vk(spec) else {
         return false;
     };
-    let delay = at_least(delay);
-    key_event(vk, false);
-    sleep(delay);
-    key_event(vk, true);
-    sleep(delay);
+    send_key_tap(vk, delay);
+    sleep(at_least(delay));
     true
 }
 
 /// Hold a key down without releasing.
 pub fn key_down(ch: char) {
-    key_event(char_to_vk(ch), false);
+    send_key(char_to_vk(ch), false);
 }
 
 /// Release a previously held key.
 pub fn key_up(ch: char) {
-    key_event(char_to_vk(ch), true);
+    send_key(char_to_vk(ch), true);
 }
 
 /// Release WASD/Space/Shift/Ctrl/Alt and the two main mouse buttons. Used
@@ -177,9 +274,9 @@ pub fn release_movement_keys() {
         0x02, // RMB
     ];
     for k in KEYS {
-        key_event(*k, true);
+        send_key(*k, true);
     }
-    sleep(Duration::from_millis(50));
+    sleep(Duration::from_millis(30));
 }
 
 /// Release every key the OS currently considers pressed.
@@ -188,8 +285,8 @@ pub fn release_movement_keys() {
 /// `KEYUP` for each VK whose high bit is set. Avoids spamming `keyup` for
 /// keys the user wasn't holding, so IME / modifier toggle state stays clean.
 ///
-/// Skips VK 0 (unused) and the 0xE? OEM cluster's well-known bogus codes
-/// that some keyboards report as stuck.
+/// Skips VK_PACKET (0xE7) — it isn't a physical key and "releasing" it
+/// can produce stray characters in the focused control.
 pub fn release_all_keys() {
     let mut state = [0u8; 256];
     if unsafe { GetKeyboardState(&mut state) }.is_err() {
@@ -199,39 +296,36 @@ pub fn release_all_keys() {
     }
     let mut released = 0u32;
     for vk in 1u16..=254u16 {
-        // Skip VK_PACKET (0xE7) — it isn't a physical key, it's used for
-        // injected unicode strokes and "releasing" it can produce stray
-        // characters in the focused control.
         if vk == 0xE7 {
             continue;
         }
         if state[vk as usize] & 0x80 != 0 {
-            key_event(vk as u8, true);
+            send_key(vk as u8, true);
             released += 1;
         }
     }
     if released > 0 {
-        sleep(Duration::from_millis(30));
+        sleep(Duration::from_millis(20));
     }
 }
 
 /// Type the standard "select all + delete" sequence into the focused control.
 pub fn clear_input(delay: Duration) {
     let delay = at_least(delay);
-    key_down('\u{11}');
-    sleep(delay);
-    press_key('A', delay);
-    key_up('\u{11}');
-    sleep(delay);
-    press_key('\u{2E}', delay); // Delete
+    send_key(VK_CONTROL, false);
+    sleep(MIN_KEY_INTERVAL);
+    send_key_tap(VK_A, delay);
+    send_key(VK_CONTROL, true);
+    sleep(MIN_KEY_INTERVAL);
+    send_key_tap(VK_DELETE, delay);
 }
 
 /// Type the standard Ctrl+V paste shortcut.
 pub fn paste_clipboard() {
-    key_down('\u{11}');
+    send_key(VK_CONTROL, false);
     sleep(MIN_KEY_INTERVAL);
-    press_key('V', MIN_KEY_INTERVAL);
-    key_up('\u{11}');
+    send_key_tap(VK_V, MIN_KEY_INTERVAL);
+    send_key(VK_CONTROL, true);
     // Without this trailing rest CS2 occasionally treats the next
     // synthesised key (Enter) as a Ctrl-modified one before the OS has
     // delivered the modifier-up event.
@@ -240,7 +334,7 @@ pub fn paste_clipboard() {
 
 /// Press the Enter key once.
 pub fn press_enter() {
-    press_key('\u{0D}', MIN_KEY_INTERVAL);
+    send_key_tap(VK_RETURN, MIN_KEY_INTERVAL);
 }
 
 /// Read the clipboard's current text contents, if any.
@@ -309,4 +403,4 @@ fn process_image_name(pid: u32) -> Option<PathBuf> {
 
 // Suppress unused-imports warning from PWSTR if Windows API surface changes.
 #[allow(dead_code)]
-fn _force_link(_: PWSTR, _: VIRTUAL_KEY) {}
+fn _force_link(_: PWSTR, _: VIRTUAL_KEY, _: KEYBD_EVENT_FLAGS) {}
