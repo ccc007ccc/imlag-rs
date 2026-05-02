@@ -170,16 +170,43 @@ fn build_input(vk: u8, up: bool) -> INPUT {
     }
 }
 
-/// Push a slice of inputs through `SendInput` atomically. Returns the
-/// raw `Win32_Error` (typically 5 = ACCESS_DENIED for UIPI blocks) so
-/// callers can decide whether to abort the whole sequence.
+/// Push a slice of inputs through `SendInput` atomically.
+///
+/// Per Microsoft docs, `SendInput` returns 0 (with `GetLastError` ==
+/// `ERROR_ACCESS_DENIED`) when *"the input was already blocked by
+/// another thread"* — i.e. somebody (often the foreground game's
+/// anti-cheat / menu / loading-screen layer) called `BlockInput(TRUE)`.
+/// These blocks are typically transient (tens to a few hundred ms), so
+/// we retry a small number of times before surfacing the failure. This
+/// is *not* a fallback to a different API — it's the same SendInput call,
+/// just persistent against transient input freezes.
+///
+/// Atomic guarantee preserved: each attempt resends the *whole* slice,
+/// so the OS never observes a partial sequence (a half-pressed Ctrl, etc.).
 fn submit(inputs: &[INPUT]) -> io::Result<()> {
-    let n = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
-    if n as usize == inputs.len() {
-        return Ok(());
+    const MAX_ATTEMPTS: u32 = 4;
+    const RETRY_DELAY: Duration = Duration::from_millis(40);
+
+    let mut last_err: Option<io::Error> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        let n = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+        if n as usize == inputs.len() {
+            return Ok(());
+        }
+        let err = unsafe { GetLastError() };
+        let io_err = io::Error::from_raw_os_error(err.0 as i32);
+        if attempt == 0 {
+            tracing::trace!(
+                "SendInput blocked (attempt {}/{MAX_ATTEMPTS}): {io_err}",
+                attempt + 1
+            );
+        }
+        last_err = Some(io_err);
+        if attempt + 1 < MAX_ATTEMPTS {
+            sleep(RETRY_DELAY);
+        }
     }
-    let err = unsafe { GetLastError() };
-    Err(io::Error::from_raw_os_error(err.0 as i32))
+    Err(last_err.unwrap_or_else(|| io::Error::other("SendInput retry exhausted")))
 }
 
 /// RAII guard that *guarantees* a key gets a `KEYUP` event no matter
