@@ -1,0 +1,33 @@
+[package]
+name = "imlag-tauri"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ImLag desktop app — Tauri 2 + React + Win11 acrylic"
+default-run = "imlag-tauri"
+
+[[bin]]
+name = "imlag-tauri"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+imlag-core   = { path = "../imlag-core" }
+tauri        = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot  = { workspace = true }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

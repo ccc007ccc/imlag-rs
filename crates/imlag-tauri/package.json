@@ -1,0 +1,19 @@
+{
+  "name": "imlag",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ImLag desktop app — Tauri 2 + React 19",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "preview": "tauri build --debug",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:typecheck": "npm --prefix frontend run typecheck",
+    "frontend:install": "npm --prefix frontend install"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.4.0"
+  }
+}

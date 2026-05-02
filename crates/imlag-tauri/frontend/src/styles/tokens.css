@@ -1,0 +1,136 @@
+/*
+  ImLag · Win11 Fluent + CS2 调色板
+  ----------------------------------
+  布局沿用 Fluent 2，但 accent 色板替换为 CS2 经典战术橙
+  （HUD 弹药/任务提示色）。背景仍是深色 acrylic（深海军蓝），
+  橙色在其上对比度足够、辨识度比 Win11 蓝更高，也更符合
+  CS GO/CS2 用户的视觉记忆。
+
+  Token 命名沿用 Fluent 2：
+    fill-*    背景填充（卡片、控件、低强调表面）
+    stroke-*  边框 / 分隔线
+    fg-*      前景（文字、图标）
+    accent-*  品牌强调色（CS 战术橙）
+*/
+
+@theme {
+  /* ── Surface fills ──────────────────────────────────────────── */
+  /*
+    alpha 取值原则：哪怕桌面是纯白壁纸 / 浅色 IDE 主题，acrylic 透过
+    来颜色发白，下方控件也要保证 ≥ AA 对比度。所以卡片 ≥ 0.78、
+    输入 ≥ 0.80、控件 ≥ 0.75 —— 仍然保留少量通透感，但白底也压得住。
+  */
+  --color-fill-card: rgb(40 42 50 / 0.82);
+  --color-fill-card-hover: rgb(56 58 66 / 0.88);
+  --color-fill-card-pressed: rgb(64 66 74 / 0.92);
+
+  --color-fill-control: rgb(60 62 70 / 0.78);
+  --color-fill-control-hover: rgb(76 78 86 / 0.86);
+  --color-fill-control-pressed: rgb(48 50 58 / 0.78);
+  --color-fill-control-disabled: rgb(40 42 50 / 0.55);
+
+  --color-fill-input: rgb(20 22 28 / 0.80);
+  --color-fill-input-focused: rgb(14 16 22 / 0.92);
+
+  --color-fill-subtle: rgb(255 255 255 / 0);
+  --color-fill-subtle-hover: rgb(255 255 255 / 0.08);
+  --color-fill-subtle-pressed: rgb(255 255 255 / 0.04);
+
+  /* Toggle / 选择器 OFF 状态 —— 在半透明卡片上必须可见 */
+  --color-fill-track-off: rgb(20 22 28 / 0.88);
+  --color-fill-track-off-hover: rgb(34 36 44 / 0.92);
+
+  --color-fill-tab-selected: rgb(255 255 255 / 0.12);
+  --color-fill-overlay: rgb(0 0 0 / 0.50);
+
+  /*
+    App chrome（标题栏 / 标签栏 / 状态栏）共用 —— 提到 token 方便统一调，
+    alpha 0.78 让顶/底栏在任何桌面色下都保有清晰的"边框线"，又不会
+    完全堵死 acrylic。
+  */
+  --color-fill-chrome: rgb(18 20 28 / 0.78);
+  --color-fill-chrome-soft: rgb(18 20 28 / 0.62);
+
+  /*
+    全局保底层 —— 即使 OS 不支持 acrylic，或 acrylic 透出的桌面是亮色，
+    body 也用这一层把整窗压暗，避免出现"白底白字"。
+  */
+  --color-fill-app-floor: rgb(15 17 22 / 0.55);
+
+  /* ── Strokes / dividers ─────────────────────────────────────── */
+  /* 边界 alpha 提高一档，浅底/深底都能勾出卡片轮廓 */
+  --color-stroke-default: rgb(255 255 255 / 0.22);
+  --color-stroke-strong: rgb(255 255 255 / 0.32);
+  --color-stroke-control: rgb(255 255 255 / 0.20);
+  --color-stroke-control-strong: rgb(255 255 255 / 0.40);
+  --color-stroke-divider: rgb(255 255 255 / 0.14);
+  --color-stroke-focus: #F0A93E;
+
+  /* ── Text & icons (高对比，便于在 acrylic 上阅读) ──────────── */
+  --color-fg-primary: rgb(255 255 255 / 0.96);
+  --color-fg-secondary: rgb(255 255 255 / 0.82);
+  --color-fg-tertiary: rgb(255 255 255 / 0.68);
+  --color-fg-disabled: rgb(255 255 255 / 0.40);
+  --color-fg-on-accent: rgb(15 15 18 / 0.96);
+  --color-fg-accent: #F0A93E;
+
+  /* ── Accent — CS2 战术橙（HUD/弹药指示色） ─────────────────── */
+  --color-accent-base: #DE9B35;
+  --color-accent-hover: #F0A93E;
+  --color-accent-pressed: #C7872B;
+  --color-accent-tertiary: rgb(222 155 53 / 0.22);
+  --color-accent-disabled: rgb(255 255 255 / 0.16);
+
+  /* ── 阵营色（保留备用，可用于状态/徽章） ───────────────────── */
+  --color-team-ct: #5494C7;
+  --color-team-t: #DE9B35;
+
+  /* ── Status (贴合深底高对比) ────────────────────────────────── */
+  --color-success: #6FD3A6;
+  --color-warning: #FCBA28;
+  --color-error: #FF99A4;
+  --color-info: #76B9ED;
+
+  /* ── Background base (acrylic 不可用时显示) ───────────────── */
+  --color-bg: #0F1116;
+
+  /* ── Radius (Fluent 标准) ───────────────────────────────────── */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+
+  /* ── Shadow (Fluent depth) ──────────────────────────────────── */
+  --shadow-fluent-2: 0 1px 2px rgb(0 0 0 / 0.20);
+  --shadow-fluent-4: 0 2px 4px rgb(0 0 0 / 0.28);
+  --shadow-fluent-8: 0 4px 8px rgb(0 0 0 / 0.32);
+  --shadow-fluent-16: 0 8px 16px rgb(0 0 0 / 0.36);
+  --shadow-fluent-64: 0 32px 64px rgb(0 0 0 / 0.44);
+
+  /* ── Motion ─────────────────────────────────────────────────── */
+  --ease-fluent: cubic-bezier(0.55, 0, 0, 1);
+  --ease-fluent-fast-out: cubic-bezier(0, 0, 0, 1);
+  --ease-fluent-soft-out: cubic-bezier(0.33, 0, 0.67, 1);
+  --duration-fast: 100ms;
+  --duration-normal: 167ms;
+  --duration-slow: 250ms;
+  --duration-slower: 400ms;
+
+  /* ── Typography ─────────────────────────────────────────────── */
+  --font-sans:
+    "Segoe UI Variable Display",
+    "Segoe UI Variable",
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "PingFang SC",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif;
+  --font-mono:
+    "Cascadia Mono",
+    "Consolas",
+    "ui-monospace",
+    monospace;
+}

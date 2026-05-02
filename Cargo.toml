@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/imlag-core",
+    "crates/imlag-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["ccc007ccc"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ccc007ccc/imlag-rs"
+homepage = "https://github.com/ccc007ccc/imlag-rs"
+readme = "README.md"
+
+[workspace.dependencies]
+cs2-gsi      = { path = "../cs2-gsi", version = "0.1" }
+tokio        = { version = "1.41", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+thiserror    = "2"
+anyhow       = "1"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot  = "0.12"
+arboard      = "3"
+reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+directories  = "5"
+
+[profile.release]
+lto          = "thin"
+codegen-units = 1
+strip        = true
+opt-level    = 3
