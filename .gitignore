@@ -4,6 +4,10 @@
 .idea/
 .vscode/
 *.iml
+# 前端构建产物与缓存
+**/node_modules/
+**/dist/
+*.tsbuildinfo
 # 应用生成的运行期文件
 Config.json
 Messages.txt
