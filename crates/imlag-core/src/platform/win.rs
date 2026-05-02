@@ -29,11 +29,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-/// CS2's chat box has a small grace period between gaining focus and
-/// being ready to accept characters; sub-15ms gaps before paste / Enter
-/// can drop the keystroke entirely. This is the floor every press_*
-/// helper enforces, regardless of the user's configured `key_delay`.
-const MIN_KEY_INTERVAL: Duration = Duration::from_millis(15);
+/// CS2's input sampler runs alongside the engine tick (~60–120Hz). A
+/// hold below ~25ms can be missed by a single dropped frame on a busy
+/// system; 30ms is two frames at 60fps and lands well under any
+/// reasonable user perception threshold. This is also the minimum gap
+/// every press_* helper enforces between events on the same key.
+const MIN_KEY_INTERVAL: Duration = Duration::from_millis(30);
 
 fn at_least(d: Duration) -> Duration {
     if d < MIN_KEY_INTERVAL {
@@ -181,19 +182,56 @@ fn submit(inputs: &[INPUT]) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(err.0 as i32))
 }
 
-/// Send one key event (down or up) via `SendInput`.
+/// RAII guard that *guarantees* a key gets a `KEYUP` event no matter
+/// how the surrounding code returns. Construct after a successful
+/// `KEYDOWN`; the destructor sends the matching `KEYUP` even if the
+/// caller `?`-propagates an error or panics.
+///
+/// This is the load-bearing piece against "the chat box stops opening
+/// after a few deaths": before this guard, a failed `submit(up)` would
+/// leave Ctrl / V / etc. logically held in the OS, so the next chat
+/// key press got rewritten by CS2 as a Ctrl-modified shortcut.
+struct KeyDownGuard {
+    vk: u8,
+}
+
+impl KeyDownGuard {
+    /// Send `KEYDOWN` for `vk` and return a guard that will send
+    /// `KEYUP` on drop. If the down send fails the guard is *not*
+    /// constructed (so we don't try to release a key that was never
+    /// actually pressed).
+    fn press(vk: u8) -> io::Result<Self> {
+        submit(&[build_input(vk, false)])?;
+        Ok(Self { vk })
+    }
+}
+
+impl Drop for KeyDownGuard {
+    fn drop(&mut self) {
+        // Best-effort — we never want to leave a key stuck. If even the
+        // up fails, log at trace and move on; the next release_all_keys
+        // call before the following dispatch will try again.
+        if let Err(e) = submit(&[build_input(self.vk, true)]) {
+            tracing::trace!("KeyDownGuard up vk=0x{:02X} failed: {e}", self.vk);
+        }
+    }
+}
+
+/// Send one key event (down or up) via `SendInput`. Prefer
+/// [`KeyDownGuard`] over a manual down/up pair — it survives early
+/// returns and panics.
 fn send_key(vk: u8, up: bool) -> io::Result<()> {
     submit(&[build_input(vk, up)])
 }
 
-/// Send press + release for a single VK as one `SendInput` batch — the
-/// OS delivers both events atomically. Holds the down state for `hold`
-/// (≥ [`MIN_KEY_INTERVAL`]) so CS2's input state machine sees a real
-/// keystroke, not a glitch.
+/// Tap a key: down → sleep(hold) → up. Uses [`KeyDownGuard`] so the
+/// up event always fires even if the sleep is interrupted or a future
+/// extension throws between down and up.
 fn send_key_tap(vk: u8, hold: Duration) -> io::Result<()> {
-    submit(&[build_input(vk, false)])?;
+    let _guard = KeyDownGuard::press(vk)?;
     sleep(at_least(hold));
-    submit(&[build_input(vk, true)])
+    // _guard drops here, sending up.
+    Ok(())
 }
 
 /// Send a single press-and-release. The `delay` argument controls both the
@@ -286,26 +324,36 @@ pub fn release_all_keys() {
     }
 }
 
-/// Type the standard "select all + delete" sequence into the focused control.
-pub fn clear_input(delay: Duration) -> io::Result<()> {
-    let delay = at_least(delay);
-    send_key(VK_CONTROL, false)?;
+/// Type the standard "select all + delete" sequence into the focused
+/// control. Submits the whole modifier+key cluster as a single
+/// `SendInput` batch so the events are delivered atomically — half-way
+/// failures used to leave Ctrl logically held in the OS, which the next
+/// chat-key press would rewrite as a shortcut.
+pub fn clear_input(_delay: Duration) -> io::Result<()> {
+    submit(&[
+        build_input(VK_CONTROL, false),
+        build_input(VK_A, false),
+        build_input(VK_A, true),
+        build_input(VK_CONTROL, true),
+    ])?;
     sleep(MIN_KEY_INTERVAL);
-    send_key_tap(VK_A, delay)?;
-    send_key(VK_CONTROL, true)?;
+    submit(&[build_input(VK_DELETE, false), build_input(VK_DELETE, true)])?;
     sleep(MIN_KEY_INTERVAL);
-    send_key_tap(VK_DELETE, delay)
+    Ok(())
 }
 
-/// Type the standard Ctrl+V paste shortcut.
+/// Type the standard Ctrl+V paste shortcut. Atomic batch — see
+/// [`clear_input`] for why the half-way state matters.
 pub fn paste_clipboard() -> io::Result<()> {
-    send_key(VK_CONTROL, false)?;
-    sleep(MIN_KEY_INTERVAL);
-    send_key_tap(VK_V, MIN_KEY_INTERVAL)?;
-    send_key(VK_CONTROL, true)?;
-    // Without this trailing rest CS2 occasionally treats the next
-    // synthesised key (Enter) as a Ctrl-modified one before the OS has
-    // delivered the modifier-up event.
+    submit(&[
+        build_input(VK_CONTROL, false),
+        build_input(VK_V, false),
+        build_input(VK_V, true),
+        build_input(VK_CONTROL, true),
+    ])?;
+    // Even though the up events were submitted, give CS2 a beat before
+    // the next discrete key (Enter) — without this it sometimes treats
+    // Enter as Ctrl+Enter.
     sleep(MIN_KEY_INTERVAL);
     Ok(())
 }
