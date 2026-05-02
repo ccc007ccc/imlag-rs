@@ -13,6 +13,7 @@ use cs2_gsi::events::PlayerDied;
 use cs2_gsi::GameStateListener;
 
 use parking_lot::RwLock;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -26,6 +27,11 @@ use tokio::sync::broadcast;
 /// to anything, and isn't used by other GSI tooling — so a fresh CS2
 /// install with no other tools running should bind cleanly.
 pub const DEFAULT_PORT: u16 = 47474;
+
+/// How many ports immediately above [`DEFAULT_PORT`] to try before
+/// asking the OS to assign one. Five gives generous head-room without
+/// fanning out into territory we haven't reasoned about.
+const PORT_FALLBACK_COUNT: u16 = 5;
 
 /// Internal name used for the auto-generated GSI cfg file.
 pub const GSI_SERVICE_NAME: &str = "ImLag";
@@ -126,13 +132,48 @@ impl Engine {
     }
 
     /// Start the GSI listener and write the integration cfg if needed.
+    ///
+    /// Tries [`DEFAULT_PORT`] first, falling back through
+    /// `DEFAULT_PORT+1..=DEFAULT_PORT+PORT_FALLBACK_COUNT` and finally
+    /// to an OS-assigned ephemeral port. The cfg is written *after* the
+    /// listener is bound, with the actually-bound port baked in — so
+    /// CS2 always points at the right place even if a security tool /
+    /// driver is squatting on 47474.
     pub async fn start_gsi(&self) -> anyhow::Result<()> {
-        // Best-effort: place the cfg file. Non-fatal if it fails — the user
-        // may have configured it manually.
-        match GsiCfg::for_localhost(GSI_SERVICE_NAME, DEFAULT_PORT).write_to_cs2() {
+        self.attach_handlers();
+
+        let fallbacks: Vec<SocketAddr> = (1..=PORT_FALLBACK_COUNT)
+            .map(|offset| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT + offset))
+            // Final fallback: port 0 → OS picks any free ephemeral. Bind
+            // here cannot really fail.
+            .chain(std::iter::once(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                0,
+            )))
+            .collect();
+
+        self.listener.start_with_fallbacks(fallbacks).await?;
+        let bound_port = self
+            .listener
+            .actual_addr()
+            .map(|a| a.port())
+            .unwrap_or(DEFAULT_PORT);
+
+        if bound_port != DEFAULT_PORT {
+            self.emit(UiEvent::warn(
+                UiKind::Gsi,
+                format!(
+                    "首选端口 {DEFAULT_PORT} 被占用，已切换到 {bound_port}（CS2 cfg 同步更新）"
+                ),
+            ));
+        }
+
+        // Best-effort: place the cfg file with the *actual* bound port.
+        // Non-fatal if it fails — the user may have configured it manually.
+        match GsiCfg::for_localhost(GSI_SERVICE_NAME, bound_port).write_to_cs2() {
             Ok(p) => self.emit(UiEvent::info(
                 UiKind::Cfg,
-                format!("写入 GSI cfg: {}", p.display()),
+                format!("写入 GSI cfg: {} (端口 {bound_port})", p.display()),
             )),
             Err(e) => self.emit(UiEvent::warn(
                 UiKind::Cfg,
@@ -140,8 +181,6 @@ impl Engine {
             )),
         }
 
-        self.attach_handlers();
-        self.listener.start().await?;
         self.emit(UiEvent::info(UiKind::Gsi, i18n::t("gsi.started")));
         Ok(())
     }
