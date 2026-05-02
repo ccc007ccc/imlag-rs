@@ -57,3 +57,22 @@ pub fn clipboard_text() -> Option<String> {
 pub fn idle_millis() -> u32 {
     u32::MAX
 }
+
+/// Stub IL placeholder for non-Windows.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IntegrityLevel {
+    /// Always returned on non-Windows.
+    Unknown,
+}
+
+impl IntegrityLevel {
+    /// Short human-readable label for display.
+    pub fn label(self) -> &'static str {
+        "n/a"
+    }
+}
+
+/// Stub: returns [`IntegrityLevel::Unknown`] outside Windows.
+pub fn current_process_integrity_level() -> IntegrityLevel {
+    IntegrityLevel::Unknown
+}

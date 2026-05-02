@@ -18,12 +18,17 @@ use std::time::Duration;
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE, HWND};
+use windows::Win32::Security::{
+    GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardState, GetLastInputInfo, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0,
-    INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    keybd_event, GetKeyboardState, GetLastInputInfo, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT,
+    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     KEYEVENTF_SCANCODE, LASTINPUTINFO, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
@@ -142,12 +147,47 @@ fn is_extended_vk(vk: u8) -> bool {
     )
 }
 
+/// Tracks whether we've already noisily logged that SendInput is being
+/// blocked (typically UIPI: imlag's IL is below the foreground window's).
+/// We log once, then keep silently falling back so the warning-spam
+/// doesn't drown the rest of the trace.
+static UIPI_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn warn_uipi_once(context: &str) {
+    use std::sync::atomic::Ordering;
+    if !UIPI_WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "SendInput blocked ({context}) — likely UIPI / integrity-level mismatch with CS2. \
+             Falling back to keybd_event; further failures will be silent. \
+             If injection still fails, run imlag with the same elevation as CS2."
+        );
+    }
+}
+
+/// Old-API fallback for when `SendInput` fails. `keybd_event` ultimately
+/// reaches the same kernel path but its UIPI checks behave differently
+/// in some configurations and does land where SendInput won't.
+fn keybd_event_fallback(vk: u8, scan: u8, extended: bool, up: bool) {
+    let mut flags = KEYBD_EVENT_FLAGS(KEYEVENTF_SCANCODE.0);
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    unsafe {
+        keybd_event(vk, scan, flags, 0);
+    }
+}
+
 /// Send one key event (down or up) via `SendInput`, using a scan code
-/// so CS2's raw-input pipeline picks it up reliably.
+/// so CS2's raw-input pipeline picks it up reliably. Falls back to
+/// `keybd_event` if SendInput is blocked.
 fn send_key(vk: u8, up: bool) {
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+    let extended = is_extended_vk(vk);
     let mut flags = KEYEVENTF_SCANCODE;
-    if is_extended_vk(vk) {
+    if extended {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
     if up {
@@ -169,18 +209,20 @@ fn send_key(vk: u8, up: bool) {
     };
     let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
     if sent == 0 {
-        let err = unsafe { GetLastError() };
-        tracing::warn!("SendInput dropped key vk=0x{vk:02X} up={up}: {err:?}");
+        warn_uipi_once(&format!("vk=0x{vk:02X} up={up}"));
+        keybd_event_fallback(vk, scan as u8, extended, up);
     }
 }
 
 /// Send press + release for a single VK as one `SendInput` batch — the
-/// OS delivers them atomically to whoever is listening.
+/// OS delivers them atomically to whoever is listening. Falls back to
+/// `keybd_event` per-event if SendInput is blocked.
 fn send_key_tap(vk: u8, hold: Duration) {
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+    let extended = is_extended_vk(vk);
     let mut flags_down = KEYEVENTF_SCANCODE;
     let mut flags_up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
-    if is_extended_vk(vk) {
+    if extended {
         flags_down |= KEYEVENTF_EXTENDEDKEY;
         flags_up |= KEYEVENTF_EXTENDEDKEY;
     }
@@ -208,21 +250,16 @@ fn send_key_tap(vk: u8, hold: Duration) {
             },
         },
     };
-    // Send down first, sleep for the hold time, then send up. CS2 wants
-    // a non-zero hold so its key-repeat / chat-input state machine sees
-    // a real keystroke, not a glitch.
     let n = unsafe { SendInput(&[down], std::mem::size_of::<INPUT>() as i32) };
     if n == 0 {
-        tracing::warn!("SendInput dropped down vk=0x{vk:02X}: {:?}", unsafe {
-            GetLastError()
-        });
+        warn_uipi_once(&format!("tap vk=0x{vk:02X} down"));
+        keybd_event_fallback(vk, scan as u8, extended, false);
     }
     sleep(at_least(hold));
     let n = unsafe { SendInput(&[up], std::mem::size_of::<INPUT>() as i32) };
     if n == 0 {
-        tracing::warn!("SendInput dropped up vk=0x{vk:02X}: {:?}", unsafe {
-            GetLastError()
-        });
+        warn_uipi_once(&format!("tap vk=0x{vk:02X} up"));
+        keybd_event_fallback(vk, scan as u8, extended, true);
     }
 }
 
@@ -257,9 +294,14 @@ pub fn key_up(ch: char) {
     send_key(char_to_vk(ch), true);
 }
 
-/// Release WASD/Space/Shift/Ctrl/Alt and the two main mouse buttons. Used
-/// before injecting a chat sequence, so the player's own held keys don't
-/// interfere with the typing.
+/// Release WASD/Space/Shift/Ctrl/Alt — the keyboard movement set the
+/// player is most likely to be holding when chat opens.
+///
+/// Mouse buttons (vk 0x01/0x02) used to live in this list, but they are
+/// not keyboard VKs — `SendInput INPUT_KEYBOARD` rejects them with
+/// `ERROR_ACCESS_DENIED` and the press isn't actually injected anyway.
+/// Held mouse buttons don't bleed into the chat box, so we don't need
+/// to release them here.
 pub fn release_movement_keys() {
     const KEYS: &[u8] = &[
         0x57, // W
@@ -270,8 +312,6 @@ pub fn release_movement_keys() {
         0x10, // Shift
         0x11, // Ctrl
         0x12, // Alt
-        0x01, // LMB
-        0x02, // RMB
     ];
     for k in KEYS {
         send_key(*k, true);
@@ -296,7 +336,10 @@ pub fn release_all_keys() {
     }
     let mut released = 0u32;
     for vk in 1u16..=254u16 {
-        if vk == 0xE7 {
+        // Skip non-keyboard VKs that GetKeyboardState may report:
+        //   0x01..=0x06 — mouse buttons + reserved
+        //   0xE7        — VK_PACKET (synthetic unicode injection slot)
+        if matches!(vk, 0x01..=0x06 | 0xE7) {
             continue;
         }
         if state[vk as usize] & 0x80 != 0 {
@@ -404,3 +447,107 @@ fn process_image_name(pid: u32) -> Option<PathBuf> {
 // Suppress unused-imports warning from PWSTR if Windows API surface changes.
 #[allow(dead_code)]
 fn _force_link(_: PWSTR, _: VIRTUAL_KEY, _: KEYBD_EVENT_FLAGS) {}
+
+/// Coarse process integrity level — bucketed the way Windows reports it
+/// in the SID. Higher == more privileged.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IntegrityLevel {
+    /// AppContainer / sandboxed.
+    Untrusted,
+    /// Default for most internet-facing apps.
+    Low,
+    /// Default for most desktop apps including non-elevated CS2.
+    Medium,
+    /// Elevated via UAC.
+    High,
+    /// Local System / kernel.
+    System,
+    /// Couldn't query (rare).
+    Unknown,
+}
+
+impl IntegrityLevel {
+    /// Short human-readable label for display in status bars and logs.
+    pub fn label(self) -> &'static str {
+        match self {
+            IntegrityLevel::Untrusted => "untrusted",
+            IntegrityLevel::Low => "low",
+            IntegrityLevel::Medium => "medium",
+            IntegrityLevel::High => "high (admin)",
+            IntegrityLevel::System => "system",
+            IntegrityLevel::Unknown => "unknown",
+        }
+    }
+}
+
+/// The well-known integrity-level RIDs (the last sub-authority of an
+/// `S-1-16-x` SID). Source: docs.microsoft.com/windows/win32/secauthz/well-known-sids
+const SECURITY_MANDATORY_UNTRUSTED_RID: u32 = 0x0000_0000;
+const SECURITY_MANDATORY_LOW_RID: u32 = 0x0000_1000;
+const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x0000_2000;
+const SECURITY_MANDATORY_HIGH_RID: u32 = 0x0000_3000;
+const SECURITY_MANDATORY_SYSTEM_RID: u32 = 0x0000_4000;
+
+/// Return the integrity level of the **current** process. Used to warn
+/// the user up-front if SendInput is going to be UIPI-blocked by CS2.
+pub fn current_process_integrity_level() -> IntegrityLevel {
+    use windows::Win32::Foundation::HANDLE;
+
+    let mut token: HANDLE = HANDLE::default();
+    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_ok() };
+    if !opened {
+        return IntegrityLevel::Unknown;
+    }
+
+    // First query asks for the required buffer size.
+    let mut needed: u32 = 0;
+    let _ = unsafe { GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut needed) };
+    if needed == 0 {
+        let _ = unsafe { CloseHandle(token) };
+        return IntegrityLevel::Unknown;
+    }
+
+    let mut buf = vec![0u8; needed as usize];
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            needed,
+            &mut needed,
+        )
+        .is_ok()
+    };
+    let _ = unsafe { CloseHandle(token) };
+    if !ok {
+        return IntegrityLevel::Unknown;
+    }
+
+    // The buffer is a TOKEN_MANDATORY_LABEL whose Label.Sid points at a
+    // SID with at least one sub-authority — the last one is the IL RID.
+    let label = unsafe { &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+    let psid = label.Label.Sid;
+    if psid.is_invalid() {
+        return IntegrityLevel::Unknown;
+    }
+    // SID layout: Revision (1) | SubAuthorityCount (1) | Identifier (6) | SubAuthority[]
+    // We want the last sub-authority. Read manually because windows crate
+    // doesn't expose GetSidSubAuthority/GetSidSubAuthorityCount in our profile.
+    let raw = psid.0 as *const u8;
+    let count = unsafe { *raw.add(1) } as usize;
+    if count == 0 {
+        return IntegrityLevel::Unknown;
+    }
+    let last_index = count - 1;
+    let sub_auth_ptr = unsafe { raw.add(8 + last_index * 4) as *const u32 };
+    let rid = unsafe { sub_auth_ptr.read_unaligned() };
+
+    match rid {
+        r if r >= SECURITY_MANDATORY_SYSTEM_RID => IntegrityLevel::System,
+        r if r >= SECURITY_MANDATORY_HIGH_RID => IntegrityLevel::High,
+        r if r >= SECURITY_MANDATORY_MEDIUM_RID => IntegrityLevel::Medium,
+        r if r >= SECURITY_MANDATORY_LOW_RID => IntegrityLevel::Low,
+        SECURITY_MANDATORY_UNTRUSTED_RID => IntegrityLevel::Untrusted,
+        _ => IntegrityLevel::Unknown,
+    }
+}

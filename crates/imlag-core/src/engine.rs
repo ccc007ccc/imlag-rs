@@ -143,6 +143,24 @@ impl Engine {
     pub async fn start_gsi(&self) -> anyhow::Result<()> {
         self.attach_handlers();
 
+        // Heads-up if we're going to bump into UIPI when injecting keys
+        // into a more privileged CS2. Caller can act on this even before
+        // the first death triggers.
+        let il = crate::platform::current_process_integrity_level();
+        if !matches!(
+            il,
+            crate::platform::IntegrityLevel::High | crate::platform::IntegrityLevel::System
+        ) {
+            self.emit(UiEvent::warn(
+                UiKind::Gsi,
+                format!(
+                    "进程权限等级: {}。CS2 若以更高权限运行，按键注入可能被 UIPI 拦截。\
+                     若发现 cfg/自动输入时灵时不灵，请用管理员权限重启 imlag。",
+                    il.label()
+                ),
+            ));
+        }
+
         let fallbacks: Vec<SocketAddr> = (1..=PORT_FALLBACK_COUNT)
             .map(|offset| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT + offset))
             // Final fallback: port 0 → OS picks any free ephemeral. Bind
