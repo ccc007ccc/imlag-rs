@@ -19,30 +19,50 @@ jobs:
       matrix:
         os: [windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout imlag-rs
+        uses: actions/checkout@v4
+        with:
+          path: imlag-rs
       - name: Checkout cs2-gsi sibling repo
         uses: actions/checkout@v4
         with:
           repository: ccc007ccc/cs2-gsi
-          path: ../cs2-gsi
+          path: cs2-gsi
+          ref: main
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+        with:
+          workspaces: imlag-rs
+      - name: cargo build
+        working-directory: imlag-rs
+        run: cargo build --workspace --all-targets
+      - name: cargo test
+        working-directory: imlag-rs
+        run: cargo test --workspace
 
   lints:
     name: rustfmt + clippy
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout imlag-rs
+        uses: actions/checkout@v4
+        with:
+          path: imlag-rs
       - name: Checkout cs2-gsi sibling repo
         uses: actions/checkout@v4
         with:
           repository: ccc007ccc/cs2-gsi
-          path: ../cs2-gsi
+          path: cs2-gsi
+          ref: main
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+        with:
+          workspaces: imlag-rs
+      - name: cargo fmt
+        working-directory: imlag-rs
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        working-directory: imlag-rs
+        run: cargo clippy --workspace --all-targets -- -D warnings
