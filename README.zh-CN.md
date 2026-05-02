@@ -22,8 +22,13 @@ ImLag 监听 Counter-Strike 2 的 [Game State Integration][gsi]，在你死亡�
 - **三种界面语言** — `zh-CN` / `zh-TW` / `en`，标题栏地球图标一键切换。
 - **语料管理** — 文件 / URL 导入（纯文本或 JSON 数组），自动去重。
 - **两种触发模式**
-  - **CFG 模式**：生成一组 `imlag_say_*.cfg`，patch `autoexec.cfg`，让 CS2 自己在按键触发时执行 `say "..."`。
-  - **聊天模式**：模拟键盘打开聊天框、粘贴消息、按下回车。
+  - **CFG 模式**：`autoexec.cfg` 中只写入一条
+    `bind "<触发键>" "exec imlag_say"`。派发用的 `imlag_say.cfg` 平时为空，
+    **玩家在游戏里误触触发键不会发出任何消息**。检测到死亡时 ImLag 才往
+    cfg 写入一行 `say "..."` / `say_team "..."`，按一下触发键让 CS2 执行，
+    约 300 ms 后再把 cfg 清空。消息通道支持 `优先全局 / 优先队内 / 随机` 三选一。
+  - **聊天模式**：先松开当前所有按下的键（避免 W / Shift / Ctrl 等被
+    带进聊天框），再模拟打开聊天框、粘贴消息、按下回车。
 - **安全的 cfg 改动** — 修改 `autoexec.cfg` 前先备份，一键还原会清除所有 ImLag 留下的内容。
 - **状态可视化** — 状态栏实时显示 GSI 在线状态、监听玩家死亡事件、生成的 CFG 组数。
 
@@ -129,8 +134,8 @@ imlag-rs/
 {
   "playerNames": ["你的游戏名"],
   "onlySelfDeath": true,
-  "bindKeys": ["k"],
-  "teamBindKeys": ["l"],
+  "triggerKey": "k",
+  "cfgChatMode": "global",
   "cs2Path": "",
   "useCfgMode": true,
   "chatKey": "y",
@@ -138,8 +143,7 @@ imlag-rs/
   "skipWindowCheck": false,
   "forceMode": false,
   "language": "zh-CN",
-  "autoStartGsi": true,
-  "preferTeamChat": false
+  "autoStartGsi": true
 }
 ```
 
@@ -147,15 +151,19 @@ imlag-rs/
 |---|---|
 | `playerNames` | 触发自动消息的玩家名（与 GSI `player.name` 比对） |
 | `onlySelfDeath` | 仅当 `playerNames` 中的玩家死亡时触发 |
-| `bindKeys` / `teamBindKeys` | CFG 模式下绑定的全局 / 队内按键池（程序随机选一个） |
-| `useCfgMode` | `true` = 走 CFG 轮替；`false` = 模拟键盘直接打字 |
+| `triggerKey` | CFG 模式下绑定到 `exec imlag_say` 的单个按键 |
+| `cfgChatMode` | CFG 派发通道：`"global"` / `"team"` / `"random"` |
+| `useCfgMode` | `true` = CFG 模式（写 cfg 派发槽 + 按触发键）；`false` = 模拟键盘直接打字 |
 | `chatKey` | 聊天模式下打开聊天框的键（`y` 全局 / `u` 队内） |
 | `keyDelay` | 聊天模式按键间隔 (ms)，会被钳制到 30–1000 |
 | `skipWindowCheck` | 跳过 CS2 是否前台的检查（不推荐） |
 | `forceMode` | 连按 3 次聊天键，应对 CS2 偶尔吞键 |
 | `language` | 界面语言：`zh-CN` / `zh-TW` / `en` |
 | `autoStartGsi` | 启动时自动打开 GSI 监听器 |
-| `preferTeamChat` | CFG 模式优先用队内按键 |
+
+> 旧配置文件中的 `bindKeys` / `teamBindKeys` / `preferTeamChat` 仍能正常加载：
+> 旧键池中的第一个键会迁移到 `triggerKey`，
+> `preferTeamChat: true` 会迁移到 `cfgChatMode: "team"`。
 
 `Messages.txt`：一行一条语料，UTF-8 编码。
 

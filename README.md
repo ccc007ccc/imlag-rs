@@ -31,11 +31,16 @@ The GSI parser is split into its own open-source crate:
 - **Corpus management** — import from a file or URL (plain text or JSON
   array), de-duplicated automatically.
 - **Two trigger modes**
-  - **CFG mode** — generates a fan-out of `imlag_say_*.cfg`, patches
-    `autoexec.cfg`, and lets CS2 itself execute `say "..."` when you press
-    a bound key.
-  - **Chat mode** — opens the chat box, pastes the message, hits Enter,
-    via simulated keystrokes.
+  - **CFG mode** — patches `autoexec.cfg` once with a single
+    `bind "<trigger>" "exec imlag_say"`. The dispatch cfg is **empty between
+    deaths**, so accidentally pressing the trigger key in-game is a no-op
+    (no preset leaks). On every death ImLag rewrites the cfg with one
+    `say "..."` / `say_team "..."` line, taps the trigger, waits ~300 ms,
+    then clears the cfg again. Channel selection is `global` / `team` /
+    `random`.
+  - **Chat mode** — releases every held key first (so movement / lean /
+    crouch don't bleed in), opens the chat box, pastes the message, hits
+    Enter, via simulated keystrokes.
 - **Safe cfg edits** — original `autoexec.cfg` is backed up before any
   modification; one-click restore removes every ImLag artefact.
 - **Live status** — real-time GSI online state, watched-player death
@@ -150,8 +155,8 @@ thanks to serde aliases):
 {
   "playerNames": ["YourInGameName"],
   "onlySelfDeath": true,
-  "bindKeys": ["k"],
-  "teamBindKeys": ["l"],
+  "triggerKey": "k",
+  "cfgChatMode": "global",
   "cs2Path": "",
   "useCfgMode": true,
   "chatKey": "y",
@@ -159,8 +164,7 @@ thanks to serde aliases):
   "skipWindowCheck": false,
   "forceMode": false,
   "language": "zh-CN",
-  "autoStartGsi": true,
-  "preferTeamChat": false
+  "autoStartGsi": true
 }
 ```
 
@@ -168,15 +172,19 @@ thanks to serde aliases):
 |---|---|
 | `playerNames` | Names whose deaths trigger a chat reply (compared against GSI `player.name`) |
 | `onlySelfDeath` | Only fire when one of `playerNames` is the dying player |
-| `bindKeys` / `teamBindKeys` | Key pool for CFG-mode global / team chat (one is picked at random) |
-| `useCfgMode` | `true` = bound-key cycling cfg; `false` = simulate keys directly |
+| `triggerKey` | Single key bound to `exec imlag_say` in CFG mode |
+| `cfgChatMode` | CFG dispatch channel: `"global"` / `"team"` / `"random"` |
+| `useCfgMode` | `true` = CFG mode (cfg slot rewrite + trigger key); `false` = simulate keys directly |
 | `chatKey` | Chat-mode opener (`y` for global, `u` for team) |
 | `keyDelay` | Inter-key delay (ms), clamped to 30–1000 |
 | `skipWindowCheck` | Bypass the "is CS2 the foreground window?" guard (not recommended) |
 | `forceMode` | Press the chat-open key 3× to defeat occasional swallowed input |
 | `language` | UI language: `zh-CN` / `zh-TW` / `en` |
 | `autoStartGsi` | Start the GSI listener on launch |
-| `preferTeamChat` | Use team chat keys over global keys in CFG mode |
+
+> Older configs that still carry `bindKeys` / `teamBindKeys` / `preferTeamChat`
+> keep loading: the first legacy key migrates into `triggerKey`, and
+> `preferTeamChat: true` migrates into `cfgChatMode: "team"`.
 
 `Messages.txt`: one corpus entry per line, UTF-8.
 
