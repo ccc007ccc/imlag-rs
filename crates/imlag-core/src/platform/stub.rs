@@ -5,7 +5,16 @@
 use std::io;
 use std::time::Duration;
 
-/// Stub: log a warning, do nothing.
+/// Stub Cs2Window placeholder.
+#[derive(Clone, Copy, Debug)]
+pub struct Cs2Window(());
+
+/// Stub: pretend CS2 isn't running.
+pub fn find_cs2_window() -> Option<Cs2Window> {
+    None
+}
+
+/// Stub.
 pub fn press_key(_ch: char, _delay: Duration) -> io::Result<()> {
     tracing::warn!("press_key is a no-op on this platform");
     Ok(())
@@ -23,28 +32,17 @@ pub fn spec_to_vk(_spec: &str) -> Option<u8> {
 }
 
 /// Stub.
-pub fn key_down(_ch: char) -> io::Result<()> {
+pub fn post_char_key(_target: Cs2Window, _ch: char, _hold: Duration) -> io::Result<()> {
     Ok(())
 }
 
 /// Stub.
-pub fn key_up(_ch: char) -> io::Result<()> {
+pub fn post_char(_target: Cs2Window, _c: char) -> io::Result<()> {
     Ok(())
 }
 
 /// Stub.
-pub fn release_movement_keys() {}
-
-/// Stub.
-pub fn release_all_keys() {}
-
-/// Stub.
-pub fn clear_input(_delay: Duration) -> io::Result<()> {
-    Ok(())
-}
-
-/// Stub.
-pub fn paste_clipboard() -> io::Result<()> {
+pub fn post_enter(_target: Cs2Window) -> io::Result<()> {
     Ok(())
 }
 
@@ -57,11 +55,6 @@ pub fn press_enter() -> io::Result<()> {
 /// window.
 pub fn is_cs2_active() -> bool {
     false
-}
-
-/// Stub: no clipboard access reported (caller will skip restore).
-pub fn clipboard_text() -> Option<String> {
-    None
 }
 
 /// Stub: pretend the user has just been idle forever, so callers don't

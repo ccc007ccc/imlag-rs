@@ -1,5 +1,5 @@
-//! OS-specific automation primitives — keyboard, foreground-window detection,
-//! clipboard.
+//! OS-specific automation primitives — keyboard injection via
+//! `PostMessageW` to CS2's main window, plus foreground-window detection.
 //!
 //! On Windows we call into Win32 directly. On other platforms the same
 //! functions exist but become no-ops or best-effort, since CS2 only runs on
@@ -14,11 +14,3 @@ pub use win::*;
 mod stub;
 #[cfg(not(windows))]
 pub use stub::*;
-
-/// Cross-platform clipboard write. Returns an error if the OS clipboard
-/// could not be accessed.
-pub fn set_clipboard_text(text: &str) -> anyhow::Result<()> {
-    let mut cb = arboard::Clipboard::new()?;
-    cb.set_text(text.to_string())?;
-    Ok(())
-}

@@ -201,20 +201,15 @@ impl CfgManager {
 
         write_dispatch_line(&cfg_path, message, in_team_chat)?;
 
-        // Release any keys the player might still be holding so the
-        // game-side `bind` actually fires when we synthesise the press.
-        crate::platform::release_all_keys();
-        sleep(Duration::from_millis(40));
-
+        // PostMessage path — no need to release real-keyboard state,
+        // we're not touching the OS-level input queue. Just tap the
+        // trigger key directly to CS2's window.
         match crate::platform::press_key_spec(&trigger_spec, Duration::from_millis(60)) {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!("trigger key spec '{trigger_spec}' is not recognised");
             }
             Err(e) => {
-                // SendInput got rejected — bail out before clearing the
-                // cfg so the user can press the trigger manually if they
-                // really want to send.
                 return Err(CfgError::Io(e));
             }
         }

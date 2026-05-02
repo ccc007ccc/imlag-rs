@@ -17,7 +17,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
-arboard = { workspace = true }
 reqwest = { workspace = true }
 directories = { workspace = true }
 fastrand = "2"
