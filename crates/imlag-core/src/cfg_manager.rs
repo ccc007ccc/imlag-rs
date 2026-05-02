@@ -206,8 +206,17 @@ impl CfgManager {
         crate::platform::release_all_keys();
         sleep(Duration::from_millis(40));
 
-        if !crate::platform::press_key_spec(&trigger_spec, Duration::from_millis(60)) {
-            tracing::warn!("trigger key spec '{trigger_spec}' is not recognised");
+        match crate::platform::press_key_spec(&trigger_spec, Duration::from_millis(60)) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!("trigger key spec '{trigger_spec}' is not recognised");
+            }
+            Err(e) => {
+                // SendInput got rejected — bail out before clearing the
+                // cfg so the user can press the trigger manually if they
+                // really want to send.
+                return Err(CfgError::Io(e));
+            }
         }
 
         // Give CS2 a beat to finish exec'ing the file before we wipe it.

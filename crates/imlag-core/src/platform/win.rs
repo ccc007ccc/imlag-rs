@@ -1,35 +1,31 @@
 //! Windows implementations of keyboard automation and foreground-window
 //! detection. Direct Win32 calls via the `windows` crate.
 //!
-//! Keystroke injection goes through `SendInput` with **scan codes**
+//! Keystroke injection goes through **`SendInput` with scan codes**
 //! (`KEYEVENTF_SCANCODE`). CS2 / Source 2 uses SDL2, which on Windows
-//! reads raw input. The legacy `keybd_event` API is documented as
-//! superseded — and in practice CS2 frequently drops keystrokes injected
-//! that way, *and* doesn't cleanly observe modifier-up events, leaving
-//! the in-game state stuck (Ctrl held, chat key fizzles, etc.). Switching
-//! to `SendInput` + scan codes makes the injection observable to SDL's
-//! raw-input path and atomic per call.
+//! reads raw input — scan-code injection lands directly in SDL's
+//! raw-input pipeline. There is no fallback: if SendInput is blocked
+//! (UIPI / integrity-level mismatch with CS2) we surface the error so
+//! the caller can show it to the user instead of silently looking like
+//! it worked. Run imlag with the same elevation as CS2 to make this go
+//! away.
 
 #![allow(unsafe_code)]
 
+use std::io;
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE, HWND};
-use windows::Win32::Security::{
-    GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-};
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
-};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, GetKeyboardState, GetLastInputInfo, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT,
-    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-    KEYEVENTF_SCANCODE, LASTINPUTINFO, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    GetKeyboardState, GetLastInputInfo, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0,
+    INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+    LASTINPUTINFO, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -147,53 +143,17 @@ fn is_extended_vk(vk: u8) -> bool {
     )
 }
 
-/// Tracks whether we've already noisily logged that SendInput is being
-/// blocked (typically UIPI: imlag's IL is below the foreground window's).
-/// We log once, then keep silently falling back so the warning-spam
-/// doesn't drown the rest of the trace.
-static UIPI_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn warn_uipi_once(context: &str) {
-    use std::sync::atomic::Ordering;
-    if !UIPI_WARNED.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            "SendInput blocked ({context}) — likely UIPI / integrity-level mismatch with CS2. \
-             Falling back to keybd_event; further failures will be silent. \
-             If injection still fails, run imlag with the same elevation as CS2."
-        );
-    }
-}
-
-/// Old-API fallback for when `SendInput` fails. `keybd_event` ultimately
-/// reaches the same kernel path but its UIPI checks behave differently
-/// in some configurations and does land where SendInput won't.
-fn keybd_event_fallback(vk: u8, scan: u8, extended: bool, up: bool) {
-    let mut flags = KEYBD_EVENT_FLAGS(KEYEVENTF_SCANCODE.0);
-    if extended {
-        flags |= KEYEVENTF_EXTENDEDKEY;
-    }
-    if up {
-        flags |= KEYEVENTF_KEYUP;
-    }
-    unsafe {
-        keybd_event(vk, scan, flags, 0);
-    }
-}
-
-/// Send one key event (down or up) via `SendInput`, using a scan code
-/// so CS2's raw-input pipeline picks it up reliably. Falls back to
-/// `keybd_event` if SendInput is blocked.
-fn send_key(vk: u8, up: bool) {
+/// Build one `INPUT` keyboard event for the given vk and direction.
+fn build_input(vk: u8, up: bool) -> INPUT {
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
-    let extended = is_extended_vk(vk);
     let mut flags = KEYEVENTF_SCANCODE;
-    if extended {
+    if is_extended_vk(vk) {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
     if up {
         flags |= KEYEVENTF_KEYUP;
     }
-    let input = INPUT {
+    INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
@@ -206,102 +166,77 @@ fn send_key(vk: u8, up: bool) {
                 dwExtraInfo: 0,
             },
         },
-    };
-    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-    if sent == 0 {
-        warn_uipi_once(&format!("vk=0x{vk:02X} up={up}"));
-        keybd_event_fallback(vk, scan as u8, extended, up);
     }
+}
+
+/// Push a slice of inputs through `SendInput` atomically. Returns the
+/// raw `Win32_Error` (typically 5 = ACCESS_DENIED for UIPI blocks) so
+/// callers can decide whether to abort the whole sequence.
+fn submit(inputs: &[INPUT]) -> io::Result<()> {
+    let n = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if n as usize == inputs.len() {
+        return Ok(());
+    }
+    let err = unsafe { GetLastError() };
+    Err(io::Error::from_raw_os_error(err.0 as i32))
+}
+
+/// Send one key event (down or up) via `SendInput`.
+fn send_key(vk: u8, up: bool) -> io::Result<()> {
+    submit(&[build_input(vk, up)])
 }
 
 /// Send press + release for a single VK as one `SendInput` batch — the
-/// OS delivers them atomically to whoever is listening. Falls back to
-/// `keybd_event` per-event if SendInput is blocked.
-fn send_key_tap(vk: u8, hold: Duration) {
-    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
-    let extended = is_extended_vk(vk);
-    let mut flags_down = KEYEVENTF_SCANCODE;
-    let mut flags_up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
-    if extended {
-        flags_down |= KEYEVENTF_EXTENDEDKEY;
-        flags_up |= KEYEVENTF_EXTENDEDKEY;
-    }
-    let down = INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
-                wScan: scan,
-                dwFlags: flags_down,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let up = INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
-                wScan: scan,
-                dwFlags: flags_up,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let n = unsafe { SendInput(&[down], std::mem::size_of::<INPUT>() as i32) };
-    if n == 0 {
-        warn_uipi_once(&format!("tap vk=0x{vk:02X} down"));
-        keybd_event_fallback(vk, scan as u8, extended, false);
-    }
+/// OS delivers both events atomically. Holds the down state for `hold`
+/// (≥ [`MIN_KEY_INTERVAL`]) so CS2's input state machine sees a real
+/// keystroke, not a glitch.
+fn send_key_tap(vk: u8, hold: Duration) -> io::Result<()> {
+    submit(&[build_input(vk, false)])?;
     sleep(at_least(hold));
-    let n = unsafe { SendInput(&[up], std::mem::size_of::<INPUT>() as i32) };
-    if n == 0 {
-        warn_uipi_once(&format!("tap vk=0x{vk:02X} up"));
-        keybd_event_fallback(vk, scan as u8, extended, true);
-    }
+    submit(&[build_input(vk, true)])
 }
 
 /// Send a single press-and-release. The `delay` argument controls both the
-/// hold time and the rest before returning. Both are clamped up to
-/// [`MIN_KEY_INTERVAL`] so CS2 always sees the keystroke.
-pub fn press_key(ch: char, delay: Duration) {
+/// hold time and the rest before returning.
+pub fn press_key(ch: char, delay: Duration) -> io::Result<()> {
     let vk = char_to_vk(ch);
-    send_key_tap(vk, delay);
+    send_key_tap(vk, delay)?;
     sleep(at_least(delay));
+    Ok(())
 }
 
 /// Like [`press_key`] but accepts a [CS2-style key spec][spec_to_vk]
-/// (`"k"`, `"ins"`, `"f5"`, …). Returns `false` if the spec is unknown
-/// and no key was pressed.
-pub fn press_key_spec(spec: &str, delay: Duration) -> bool {
+/// (`"k"`, `"ins"`, `"f5"`, …). Returns `Ok(false)` if the spec is
+/// unknown (no key was pressed); `Err` only when injection itself failed.
+pub fn press_key_spec(spec: &str, delay: Duration) -> io::Result<bool> {
     let Some(vk) = spec_to_vk(spec) else {
-        return false;
+        return Ok(false);
     };
-    send_key_tap(vk, delay);
+    send_key_tap(vk, delay)?;
     sleep(at_least(delay));
-    true
+    Ok(true)
 }
 
 /// Hold a key down without releasing.
-pub fn key_down(ch: char) {
-    send_key(char_to_vk(ch), false);
+pub fn key_down(ch: char) -> io::Result<()> {
+    send_key(char_to_vk(ch), false)
 }
 
 /// Release a previously held key.
-pub fn key_up(ch: char) {
-    send_key(char_to_vk(ch), true);
+pub fn key_up(ch: char) -> io::Result<()> {
+    send_key(char_to_vk(ch), true)
 }
 
 /// Release WASD/Space/Shift/Ctrl/Alt — the keyboard movement set the
 /// player is most likely to be holding when chat opens.
 ///
-/// Mouse buttons (vk 0x01/0x02) used to live in this list, but they are
-/// not keyboard VKs — `SendInput INPUT_KEYBOARD` rejects them with
-/// `ERROR_ACCESS_DENIED` and the press isn't actually injected anyway.
+/// Mouse buttons (vk 0x01/0x02) are intentionally **not** in this list:
+/// they're not keyboard VKs, and `SendInput INPUT_KEYBOARD` rejects them.
 /// Held mouse buttons don't bleed into the chat box, so we don't need
 /// to release them here.
+///
+/// Errors injecting any single key are logged and ignored — this is a
+/// best-effort cleanup, not a load-bearing operation.
 pub fn release_movement_keys() {
     const KEYS: &[u8] = &[
         0x57, // W
@@ -314,7 +249,9 @@ pub fn release_movement_keys() {
         0x12, // Alt
     ];
     for k in KEYS {
-        send_key(*k, true);
+        if let Err(e) = send_key(*k, true) {
+            tracing::trace!("release_movement_keys: vk=0x{k:02X} keyup failed: {e}");
+        }
     }
     sleep(Duration::from_millis(30));
 }
@@ -322,28 +259,25 @@ pub fn release_movement_keys() {
 /// Release every key the OS currently considers pressed.
 ///
 /// Walks the 256-entry keyboard state from `GetKeyboardState`, sends a
-/// `KEYUP` for each VK whose high bit is set. Avoids spamming `keyup` for
-/// keys the user wasn't holding, so IME / modifier toggle state stays clean.
-///
-/// Skips VK_PACKET (0xE7) — it isn't a physical key and "releasing" it
-/// can produce stray characters in the focused control.
+/// `KEYUP` for each VK whose high bit is set. Skips non-keyboard VKs
+/// (0x01..=0x06 mouse + reserved, 0xE7 VK_PACKET) and tolerates
+/// per-key injection errors silently.
 pub fn release_all_keys() {
     let mut state = [0u8; 256];
     if unsafe { GetKeyboardState(&mut state) }.is_err() {
-        // Fallback to the smaller well-known set if the syscall fails.
         release_movement_keys();
         return;
     }
     let mut released = 0u32;
     for vk in 1u16..=254u16 {
-        // Skip non-keyboard VKs that GetKeyboardState may report:
-        //   0x01..=0x06 — mouse buttons + reserved
-        //   0xE7        — VK_PACKET (synthetic unicode injection slot)
         if matches!(vk, 0x01..=0x06 | 0xE7) {
             continue;
         }
         if state[vk as usize] & 0x80 != 0 {
-            send_key(vk as u8, true);
+            if let Err(e) = send_key(vk as u8, true) {
+                tracing::trace!("release_all_keys: vk=0x{vk:02X} keyup failed: {e}");
+                continue;
+            }
             released += 1;
         }
     }
@@ -353,31 +287,32 @@ pub fn release_all_keys() {
 }
 
 /// Type the standard "select all + delete" sequence into the focused control.
-pub fn clear_input(delay: Duration) {
+pub fn clear_input(delay: Duration) -> io::Result<()> {
     let delay = at_least(delay);
-    send_key(VK_CONTROL, false);
+    send_key(VK_CONTROL, false)?;
     sleep(MIN_KEY_INTERVAL);
-    send_key_tap(VK_A, delay);
-    send_key(VK_CONTROL, true);
+    send_key_tap(VK_A, delay)?;
+    send_key(VK_CONTROL, true)?;
     sleep(MIN_KEY_INTERVAL);
-    send_key_tap(VK_DELETE, delay);
+    send_key_tap(VK_DELETE, delay)
 }
 
 /// Type the standard Ctrl+V paste shortcut.
-pub fn paste_clipboard() {
-    send_key(VK_CONTROL, false);
+pub fn paste_clipboard() -> io::Result<()> {
+    send_key(VK_CONTROL, false)?;
     sleep(MIN_KEY_INTERVAL);
-    send_key_tap(VK_V, MIN_KEY_INTERVAL);
-    send_key(VK_CONTROL, true);
+    send_key_tap(VK_V, MIN_KEY_INTERVAL)?;
+    send_key(VK_CONTROL, true)?;
     // Without this trailing rest CS2 occasionally treats the next
     // synthesised key (Enter) as a Ctrl-modified one before the OS has
     // delivered the modifier-up event.
     sleep(MIN_KEY_INTERVAL);
+    Ok(())
 }
 
 /// Press the Enter key once.
-pub fn press_enter() {
-    send_key_tap(VK_RETURN, MIN_KEY_INTERVAL);
+pub fn press_enter() -> io::Result<()> {
+    send_key_tap(VK_RETURN, MIN_KEY_INTERVAL)
 }
 
 /// Read the clipboard's current text contents, if any.
@@ -446,108 +381,4 @@ fn process_image_name(pid: u32) -> Option<PathBuf> {
 
 // Suppress unused-imports warning from PWSTR if Windows API surface changes.
 #[allow(dead_code)]
-fn _force_link(_: PWSTR, _: VIRTUAL_KEY, _: KEYBD_EVENT_FLAGS) {}
-
-/// Coarse process integrity level — bucketed the way Windows reports it
-/// in the SID. Higher == more privileged.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum IntegrityLevel {
-    /// AppContainer / sandboxed.
-    Untrusted,
-    /// Default for most internet-facing apps.
-    Low,
-    /// Default for most desktop apps including non-elevated CS2.
-    Medium,
-    /// Elevated via UAC.
-    High,
-    /// Local System / kernel.
-    System,
-    /// Couldn't query (rare).
-    Unknown,
-}
-
-impl IntegrityLevel {
-    /// Short human-readable label for display in status bars and logs.
-    pub fn label(self) -> &'static str {
-        match self {
-            IntegrityLevel::Untrusted => "untrusted",
-            IntegrityLevel::Low => "low",
-            IntegrityLevel::Medium => "medium",
-            IntegrityLevel::High => "high (admin)",
-            IntegrityLevel::System => "system",
-            IntegrityLevel::Unknown => "unknown",
-        }
-    }
-}
-
-/// The well-known integrity-level RIDs (the last sub-authority of an
-/// `S-1-16-x` SID). Source: docs.microsoft.com/windows/win32/secauthz/well-known-sids
-const SECURITY_MANDATORY_UNTRUSTED_RID: u32 = 0x0000_0000;
-const SECURITY_MANDATORY_LOW_RID: u32 = 0x0000_1000;
-const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x0000_2000;
-const SECURITY_MANDATORY_HIGH_RID: u32 = 0x0000_3000;
-const SECURITY_MANDATORY_SYSTEM_RID: u32 = 0x0000_4000;
-
-/// Return the integrity level of the **current** process. Used to warn
-/// the user up-front if SendInput is going to be UIPI-blocked by CS2.
-pub fn current_process_integrity_level() -> IntegrityLevel {
-    use windows::Win32::Foundation::HANDLE;
-
-    let mut token: HANDLE = HANDLE::default();
-    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_ok() };
-    if !opened {
-        return IntegrityLevel::Unknown;
-    }
-
-    // First query asks for the required buffer size.
-    let mut needed: u32 = 0;
-    let _ = unsafe { GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut needed) };
-    if needed == 0 {
-        let _ = unsafe { CloseHandle(token) };
-        return IntegrityLevel::Unknown;
-    }
-
-    let mut buf = vec![0u8; needed as usize];
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenIntegrityLevel,
-            Some(buf.as_mut_ptr() as *mut _),
-            needed,
-            &mut needed,
-        )
-        .is_ok()
-    };
-    let _ = unsafe { CloseHandle(token) };
-    if !ok {
-        return IntegrityLevel::Unknown;
-    }
-
-    // The buffer is a TOKEN_MANDATORY_LABEL whose Label.Sid points at a
-    // SID with at least one sub-authority — the last one is the IL RID.
-    let label = unsafe { &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
-    let psid = label.Label.Sid;
-    if psid.is_invalid() {
-        return IntegrityLevel::Unknown;
-    }
-    // SID layout: Revision (1) | SubAuthorityCount (1) | Identifier (6) | SubAuthority[]
-    // We want the last sub-authority. Read manually because windows crate
-    // doesn't expose GetSidSubAuthority/GetSidSubAuthorityCount in our profile.
-    let raw = psid.0 as *const u8;
-    let count = unsafe { *raw.add(1) } as usize;
-    if count == 0 {
-        return IntegrityLevel::Unknown;
-    }
-    let last_index = count - 1;
-    let sub_auth_ptr = unsafe { raw.add(8 + last_index * 4) as *const u32 };
-    let rid = unsafe { sub_auth_ptr.read_unaligned() };
-
-    match rid {
-        r if r >= SECURITY_MANDATORY_SYSTEM_RID => IntegrityLevel::System,
-        r if r >= SECURITY_MANDATORY_HIGH_RID => IntegrityLevel::High,
-        r if r >= SECURITY_MANDATORY_MEDIUM_RID => IntegrityLevel::Medium,
-        r if r >= SECURITY_MANDATORY_LOW_RID => IntegrityLevel::Low,
-        SECURITY_MANDATORY_UNTRUSTED_RID => IntegrityLevel::Untrusted,
-        _ => IntegrityLevel::Unknown,
-    }
-}
+fn _force_link(_: PWSTR, _: VIRTUAL_KEY) {}

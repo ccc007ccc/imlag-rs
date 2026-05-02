@@ -21,6 +21,10 @@ pub enum SendError {
     /// Clipboard could not be written or did not stick.
     #[error("clipboard write failed: {0}")]
     Clipboard(String),
+    /// `SendInput` was blocked — typically UIPI / integrity-level
+    /// mismatch with CS2. Run imlag with the same elevation as CS2.
+    #[error("key injection failed (run as admin?): {0}")]
+    Inject(String),
     /// `tokio::task::spawn_blocking` could not be joined.
     #[error("blocking task join error: {0}")]
     Join(String),
@@ -141,7 +145,7 @@ impl ChatMessageSender {
         let chat_key = first_char_or(&snap.chat_key, 'y');
         let opens = if snap.force_mode { 3 } else { 1 };
         for _ in 0..opens {
-            platform::press_key(chat_key, key_delay);
+            platform::press_key(chat_key, key_delay).map_err(inject_err)?;
             std::thread::sleep(MIN_STEP);
         }
         // The chat box needs a beat after focus before it accepts
@@ -149,11 +153,11 @@ impl ChatMessageSender {
         // "the box appears but no text".
         std::thread::sleep(Duration::from_millis(80));
 
-        platform::clear_input(key_delay);
+        platform::clear_input(key_delay).map_err(inject_err)?;
         std::thread::sleep(MIN_STEP);
-        platform::paste_clipboard();
+        platform::paste_clipboard().map_err(inject_err)?;
         std::thread::sleep(MIN_STEP);
-        platform::press_enter();
+        platform::press_enter().map_err(inject_err)?;
         Ok(())
     }
 
@@ -195,6 +199,12 @@ fn set_clipboard_verified(text: &str) -> Result<(), SendError> {
     Err(SendError::Clipboard(
         last_err.unwrap_or_else(|| "unknown".into()),
     ))
+}
+
+/// Wrap a platform-layer io::Error from key injection into a
+/// [`SendError::Inject`] with a friendly message.
+fn inject_err(e: std::io::Error) -> SendError {
+    SendError::Inject(e.to_string())
 }
 
 /// Block the calling (blocking) thread until the user has been idle for
