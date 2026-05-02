@@ -9,7 +9,7 @@
 use crate::config::AppConfig;
 use crate::platform;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Errors produced while sending a chat message.
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +26,46 @@ pub enum SendError {
     Join(String),
 }
 
+/// Hard floor between simulated keystrokes — matches the platform layer's
+/// own minimum and protects against config values that round to zero.
+const MIN_STEP: Duration = Duration::from_millis(15);
+
+/// Wait for the user to be idle this long before we start typing. Picks
+/// up most natural "I just got shot" finger-mash windows; if the user
+/// keeps drumming the keyboard past [`IDLE_WAIT_BUDGET`] we go anyway,
+/// because making the dispatch genuinely non-blocking matters more than
+/// perfect collision avoidance.
+const IDLE_THRESHOLD: Duration = Duration::from_millis(150);
+const IDLE_WAIT_BUDGET: Duration = Duration::from_millis(1000);
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// RAII guard that snapshots the clipboard on entry and restores it on
+/// drop — even if the typing pipeline panics or returns early.
+struct ClipboardGuard {
+    previous: Option<String>,
+}
+
+impl ClipboardGuard {
+    fn snapshot() -> Self {
+        Self {
+            previous: platform::clipboard_text(),
+        }
+    }
+}
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        // Give CS2 a beat to actually paste & submit before we yank the
+        // text back. 80ms covers the worst case observed locally.
+        std::thread::sleep(Duration::from_millis(80));
+        if let Some(prev) = self.previous.take() {
+            if let Err(e) = platform::set_clipboard_text(&prev) {
+                tracing::warn!("could not restore clipboard: {e}");
+            }
+        }
+    }
+}
+
 /// Sends ImLag's chat messages by simulating keystrokes.
 #[derive(Clone)]
 pub struct ChatMessageSender {
@@ -39,32 +79,46 @@ impl ChatMessageSender {
     }
 
     /// Synchronously inject a chat message — opens the chat box, pastes,
-    /// presses enter. Blocks the calling thread for `key_delay * ~7` ms.
+    /// presses enter. Restores the clipboard on the way out.
     pub fn send_message_blocking(&self, message: &str) -> Result<(), SendError> {
         let snap = self.config.read().clone();
         if !snap.skip_window_check && !platform::is_cs2_active() {
             return Err(SendError::NotForeground);
         }
-        // Release every key the OS thinks the player is holding so movement
-        // / lean / crouch keys don't get baked into the chat box.
+
+        // Wait for the player to stop spazzing on the keyboard so our
+        // synthetic strokes don't fight with real ones. Bounded so we
+        // don't sit forever if the user is permanently mashing.
+        wait_for_idle(IDLE_THRESHOLD, IDLE_WAIT_BUDGET);
+
+        // Anything held down (W/A/S/D, Ctrl, jump, etc.) would otherwise
+        // get baked into the chat box.
         platform::release_all_keys();
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(MIN_STEP.max(Duration::from_millis(80)));
+
+        // Snapshot the clipboard before we overwrite it; the guard
+        // restores it on drop, so every early return below stays clean.
+        let _restore = ClipboardGuard::snapshot();
 
         platform::set_clipboard_text(message).map_err(|e| SendError::Clipboard(e.to_string()))?;
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(MIN_STEP.max(Duration::from_millis(50)));
 
-        let key_delay = Duration::from_millis(snap.key_delay as u64);
+        let key_delay = step_delay(snap.key_delay);
         let chat_key = first_char_or(&snap.chat_key, 'y');
         let opens = if snap.force_mode { 3 } else { 1 };
         for _ in 0..opens {
             platform::press_key(chat_key, key_delay);
+            std::thread::sleep(MIN_STEP);
         }
-        std::thread::sleep(key_delay * 2);
+        // The chat box needs a beat after focus before it accepts
+        // input — paste-into-an-unfocused-control is the #1 cause of
+        // "the box appears but no text".
+        std::thread::sleep(key_delay.max(Duration::from_millis(120)));
 
         platform::clear_input(key_delay);
-        std::thread::sleep(key_delay);
+        std::thread::sleep(MIN_STEP.max(key_delay));
         platform::paste_clipboard();
-        std::thread::sleep(key_delay);
+        std::thread::sleep(MIN_STEP.max(key_delay));
         platform::press_enter();
         Ok(())
     }
@@ -79,6 +133,47 @@ impl ChatMessageSender {
     }
 }
 
+/// Block the calling (blocking) thread until the user has been idle for
+/// `threshold`, or `budget` has elapsed.
+fn wait_for_idle(threshold: Duration, budget: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < budget {
+        let idle = Duration::from_millis(platform::idle_millis() as u64);
+        if idle >= threshold {
+            return;
+        }
+        std::thread::sleep(IDLE_POLL_INTERVAL);
+    }
+}
+
+fn step_delay(configured_ms: u32) -> Duration {
+    let raw = Duration::from_millis(configured_ms as u64);
+    if raw < MIN_STEP {
+        MIN_STEP
+    } else {
+        raw
+    }
+}
+
 fn first_char_or(s: &str, fallback: char) -> char {
     s.chars().next().unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_delay_floors_at_min_step() {
+        assert_eq!(step_delay(0), MIN_STEP);
+        assert_eq!(step_delay(5), MIN_STEP);
+        assert_eq!(step_delay(15), MIN_STEP);
+        assert_eq!(step_delay(100), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn first_char_falls_back_when_empty() {
+        assert_eq!(first_char_or("", 'y'), 'y');
+        assert_eq!(first_char_or("u", 'y'), 'u');
+    }
 }
