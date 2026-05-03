@@ -4,7 +4,7 @@
 //! its toast system without losing fidelity.
 
 use crate::state::AppState;
-use imlag_core::{config::normalize_language, AppConfig, ImportResult};
+use imlag_core::{config::normalize_language, i18n, AppConfig, ImportResult, UiEvent, UiKind};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::State;
@@ -89,9 +89,13 @@ pub fn corpus_list(state: State<'_, AppState>) -> Vec<String> {
 /// Append a new entry; returns `true` when the message was actually added.
 #[tauri::command]
 pub fn corpus_add(state: State<'_, AppState>, message: String) -> Result<bool, String> {
-    let added = state.engine.corpus().add(message);
+    let added = state.engine.corpus().add(&message);
     if added {
         state.engine.save_corpus().map_err(|e| e.to_string())?;
+        state.engine.emit(UiEvent::info(
+            UiKind::Corpus,
+            i18n::t_args("status.message_added", [message.as_str()].as_slice()),
+        ));
     }
     Ok(added)
 }
@@ -99,9 +103,13 @@ pub fn corpus_add(state: State<'_, AppState>, message: String) -> Result<bool, S
 /// Remove an entry; returns `true` when something was removed.
 #[tauri::command]
 pub fn corpus_remove(state: State<'_, AppState>, message: String) -> Result<bool, String> {
-    let removed = state.engine.corpus().remove(message);
+    let removed = state.engine.corpus().remove(&message);
     if removed {
         state.engine.save_corpus().map_err(|e| e.to_string())?;
+        state.engine.emit(UiEvent::info(
+            UiKind::Corpus,
+            i18n::t_args("status.message_removed", [message.as_str()].as_slice()),
+        ));
     }
     Ok(removed)
 }
@@ -128,6 +136,17 @@ pub fn corpus_import(state: State<'_, AppState>, path: String) -> Result<ImportR
         .map_err(|e| e.to_string())?;
     if result.added > 0 {
         state.engine.save_corpus().map_err(|e| e.to_string())?;
+        state.engine.emit(UiEvent::info(
+            UiKind::Corpus,
+            i18n::t_args(
+                "status.corpus_imported",
+                [
+                    result.added.to_string().as_str(),
+                    result.skipped.to_string().as_str(),
+                ]
+                .as_slice(),
+            ),
+        ));
     }
     Ok(result)
 }
